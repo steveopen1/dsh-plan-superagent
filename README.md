@@ -107,6 +107,10 @@ dsh plugin --profile web remove dsh-plan-superagent
 
 **③ Execution（执行器）**
 
+> **`proxy`（可选，但网络不稳时必填）**：这台机器上到 GitHub 的链路时好时坏，探针/轮询/worker 的 git 都会因此失败。
+> 填一个本地 HTTP 代理地址（如 `http://127.0.0.1:7897`）即可让**全部出站流量**（GitHub 轮询、agent CLI、worker 的 git 与 gh）走它；
+> 留空则直连。**先测哪个通再填**——代理本身也可能是断的那一条。
+
 | 字段 | 建议值 | 说明 |
 | --- | --- | --- |
 | `directory` | 仓库本地 clone 的绝对路径 | 每个工单在这里开一个 worktree。 |
