@@ -1,4 +1,4 @@
-import { Plan, PlanTask, RawPlan } from './schema.js';
+import { Plan, RawPlan, TaskDesign, TreePlan } from './schema.js';
 export interface GenerateOptions {
     /** 宿主上下文（cordis Context）：提供 'llm' 与 'agentDefaultModel' 两个服务。 */
     ctx: unknown;
@@ -7,7 +7,7 @@ export interface GenerateOptions {
     /** 目标仓库的可选上下文。 */
     context?: string;
     signal?: AbortSignal;
-    /** 单次模型调用超时（毫秒），默认 90s。 */
+    /** 整段生成的**总预算**（毫秒）：树 + 全部子导图共用；默认 240s。 */
     timeoutMs?: number;
     /** 最大尝试次数（首次 + 重试），默认 3。 */
     maxAttempts?: number;
@@ -16,22 +16,56 @@ export interface GenerateOptions {
     /** 可选的模型指定（provider + model）；缺省用宿主默认模型。 */
     provider?: string;
     model?: string;
+    /**
+     * 是否为每个任务生成子导图（默认 true）。
+     * false = 不花模型调用，直接按任务已有的验收标准与范围推导一份。
+     */
+    designs?: boolean;
 }
 /** 严格 JSON 解析：只做「BOM / 思考块 / 整段代码围栏」三种精确清理，绝不按花括号切片。 */
 export declare function parseStrictJson(text: string): unknown;
+/** 语义校验要看的最小结构（树与最终计划都满足，故按结构而不是按 Plan 类型收）。 */
+export interface SemanticPlan {
+    modules: Array<{
+        id: string;
+        tasks: Array<{
+            id: string;
+            title: string;
+            acceptance: string[];
+            deps: string[];
+        }>;
+    }>;
+}
 /** 语义校验：deps 合法、id 唯一、无环、每 task 至少 1 条 acceptance。 */
-export declare function validateSemantics(plan: Plan): string[];
+export declare function validateSemantics(plan: SemanticPlan): string[];
 /** 任务依赖图判环（跨模块一并算）。 */
-export declare function depCycleOf(taskById: Map<string, PlanTask>): string[] | null;
-/** 把草稿（key 版）翻译成最终计划（id 版）：统一编号 m-1.. / t-1..，deps 映射到 task id。 */
+export declare function depCycleOf(taskById: Map<string, {
+    id: string;
+    deps: string[];
+}>): string[] | null;
+/**
+ * 把草稿（key 版）翻译成**树**（id 版，design 还没有）：
+ * 统一编号 m-1.. / t-1..，deps 映射到 task id。
+ */
 export declare function buildPlan(raw: RawPlan): {
-    plan: Plan;
+    plan: TreePlan;
     errors: string[];
 };
 /** 收集目标仓库的可选上下文（失败不阻断，退化成「无上下文」）。 */
 export declare function collectRepoContext(project: string): string;
 /**
- * 生成计划：模型 → 严格解析 → schema 校验 → 语义校验 →（不合格则回灌错误重试）。
+ * 生成计划：先出树（模型 → 严格解析 → schema 校验 → 语义校验 → 回灌错误重试），
+ * 再逐任务补子导图（单张失败只降级），最后过一遍最终 schema。
  * 全部失败时抛 PlannerError（code=MODEL_OUTPUT_INVALID），不返回半成品。
  */
 export declare function generatePlan(opts: GenerateOptions): Promise<Plan>;
+/**
+ * 推导出来的子导图。
+ *
+ * 只用任务自己已有的信息（验收标准与范围），不编造模型没有说过的东西，并写明这是推导的。
+ */
+export declare function derivedDesign(task: {
+    title: string;
+    acceptance: string[];
+    scope: string[];
+}): TaskDesign;

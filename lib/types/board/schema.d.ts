@@ -41,6 +41,7 @@ export type EditOp = {
         priority?: number;
         acceptance?: string[];
         scope?: string[];
+        note?: string;
     };
 } | {
     op: 'update_node';

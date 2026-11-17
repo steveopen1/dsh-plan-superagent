@@ -1,20 +1,34 @@
 /**
- * 「一句话 → 计划树」生成器。
+ * 「一句话 → 计划树 + 每任务子导图」生成器（**两段式**）。
  *
- * 流程：调模型 → 严格 JSON.parse（**不做 extractJson 暴力切片**）→ zod 真 schema 校验
- *      → 语义校验（deps 不悬空/不自依赖/不成环、id 全局唯一、每 task 至少 1 条 acceptance）
- *      → 不合格就把错误清单回灌给模型重试（最多 3 次）→ 仍不合格就抛具名错误。
+ * 为什么拆两段：一次输出「整棵树 + 每张子导图」的 JSON 太大，模型的流会断
+ * （实测：宿主默认的 Anthropic 兼容流 "stream ended without a stop reason"；
+ *  另一轮是内部 90s 超时直接 abort）。于是拆开：
+ *   - 第一段（树）：只出 plan → modules → tasks（title/acceptance/scope/deps/priority）；
+ *   - 第二段（子导图）：**逐个任务**单独一次调用，只出那一张的 design（输出小，流不容易断）。
  *
- * id 由本模块统一产出：module `m-1..`、task `t-1..`（跨模块全局唯一）；
- * 模型只给草稿 key，deps 在这里翻译成最终 task id。
+ * 降级纪律：某一张导图画不出来只降级（按该任务已有的验收标准与范围推导一份，并写明「自动推导」），
+ * **不让整棵计划作废**——一张导图画不出来，不等于计划不对。
+ *
+ * 预算纪律：timeoutMs 是**整段的总预算**（树 + 全部子导图共用）。
+ * 树是主产出，先给它（上限 TREE_TIMEOUT_CAP）；子导图吃剩下的，
+ * 剩下的不够了就直接推导，不再去调模型（省得最后几张卡在超时上把整次拖死）。
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { callModel } from './llm.js'
-import { PLAN_SYSTEM_PROMPT, buildUserPrompt } from './prompt.js'
+import { DESIGN_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT, buildDesignPrompt, buildUserPrompt } from './prompt.js'
 import {
-  Plan, PlanModule, PlanTask, PlannerError, RawPlan, RawPlanSchema, formatIssues,
+  Plan, PlanSchema, PlannerError, RawPlan, RawPlanSchema, TaskDesign, TaskDesignSchema,
+  TreePlan, TreeTask, formatIssues,
 } from './schema.js'
+
+/** 树阶段单次调用上限：树是主产出，值得多等一会儿。 */
+const TREE_TIMEOUT_CAP = 180_000
+/** 单张子导图的调用上限。 */
+const DESIGN_TIMEOUT_CAP = 120_000
+/** 剩余预算低于这个值就不再调模型，直接推导。 */
+const DESIGN_MIN_BUDGET = 5_000
 
 export interface GenerateOptions {
   /** 宿主上下文（cordis Context）：提供 'llm' 与 'agentDefaultModel' 两个服务。 */
@@ -24,7 +38,7 @@ export interface GenerateOptions {
   /** 目标仓库的可选上下文。 */
   context?: string
   signal?: AbortSignal
-  /** 单次模型调用超时（毫秒），默认 90s。 */
+  /** 整段生成的**总预算**（毫秒）：树 + 全部子导图共用；默认 240s。 */
   timeoutMs?: number
   /** 最大尝试次数（首次 + 重试），默认 3。 */
   maxAttempts?: number
@@ -33,6 +47,11 @@ export interface GenerateOptions {
   /** 可选的模型指定（provider + model）；缺省用宿主默认模型。 */
   provider?: string
   model?: string
+  /**
+   * 是否为每个任务生成子导图（默认 true）。
+   * false = 不花模型调用，直接按任务已有的验收标准与范围推导一份。
+   */
+  designs?: boolean
 }
 
 /** 严格 JSON 解析：只做「BOM / 思考块 / 整段代码围栏」三种精确清理，绝不按花括号切片。 */
@@ -68,12 +87,20 @@ function stripWholeCodeFence(s: string): string {
   return m[1].trim()
 }
 
+/** 语义校验要看的最小结构（树与最终计划都满足，故按结构而不是按 Plan 类型收）。 */
+export interface SemanticPlan {
+  modules: Array<{
+    id: string
+    tasks: Array<{ id: string; title: string; acceptance: string[]; deps: string[] }>
+  }>
+}
+
 /** 语义校验：deps 合法、id 唯一、无环、每 task 至少 1 条 acceptance。 */
-export function validateSemantics(plan: Plan): string[] {
+export function validateSemantics(plan: SemanticPlan): string[] {
   const errs: string[] = []
   const moduleIds = new Set<string>()
   const taskIds = new Set<string>()
-  const taskById = new Map<string, PlanTask>()
+  const taskById = new Map<string, { id: string; deps: string[] }>()
   for (const m of plan.modules) {
     if (moduleIds.has(m.id)) errs.push('模块 id 重复: ' + m.id)
     moduleIds.add(m.id)
@@ -105,7 +132,7 @@ export function validateSemantics(plan: Plan): string[] {
 }
 
 /** 任务依赖图判环（跨模块一并算）。 */
-export function depCycleOf(taskById: Map<string, PlanTask>): string[] | null {
+export function depCycleOf(taskById: Map<string, { id: string; deps: string[] }>): string[] | null {
   const color = new Map<string, number>()
   const stack: string[] = []
   let cycle: string[] | null = null
@@ -126,18 +153,21 @@ export function depCycleOf(taskById: Map<string, PlanTask>): string[] | null {
   return cycle
 }
 
-/** 把草稿（key 版）翻译成最终计划（id 版）：统一编号 m-1.. / t-1..，deps 映射到 task id。 */
-export function buildPlan(raw: RawPlan): { plan: Plan; errors: string[] } {
+/**
+ * 把草稿（key 版）翻译成**树**（id 版，design 还没有）：
+ * 统一编号 m-1.. / t-1..，deps 映射到 task id。
+ */
+export function buildPlan(raw: RawPlan): { plan: TreePlan; errors: string[] } {
   const errors: string[] = []
   const keyToId = new Map<string, string>()
   const moduleKeys = new Set<string>()
   let taskSeq = 0
 
-  const modules: PlanModule[] = []
+  const modules: TreePlan['modules'] = []
   for (const m of raw.modules) {
     if (moduleKeys.has(m.key)) errors.push('模块 key 重复: ' + m.key)
     moduleKeys.add(m.key)
-    const tasks: PlanTask[] = []
+    const tasks: TreeTask[] = []
     for (const t of m.tasks) {
       taskSeq += 1
       const tid = 't-' + String(taskSeq)
@@ -150,6 +180,7 @@ export function buildPlan(raw: RawPlan): { plan: Plan; errors: string[] } {
         scope: t.scope,
         deps: [],
         priority: t.priority,
+        // 模型顺手给了导图就留着（第二段会跳过它）；没给就等第二段补。
         design: t.design,
       })
     }
@@ -181,7 +212,7 @@ export function buildPlan(raw: RawPlan): { plan: Plan; errors: string[] } {
     }
   }
 
-  const plan: Plan = { plan: raw.plan, modules }
+  const plan: TreePlan = { plan: raw.plan, modules }
   errors.push(...validateSemantics(plan))
   return { plan, errors }
 }
@@ -223,26 +254,31 @@ export function collectRepoContext(project: string): string {
 }
 
 /**
- * 生成计划：模型 → 严格解析 → schema 校验 → 语义校验 →（不合格则回灌错误重试）。
+ * 生成计划：先出树（模型 → 严格解析 → schema 校验 → 语义校验 → 回灌错误重试），
+ * 再逐任务补子导图（单张失败只降级），最后过一遍最终 schema。
  * 全部失败时抛 PlannerError（code=MODEL_OUTPUT_INVALID），不返回半成品。
  */
 export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
   const sentence = String(opts.sentence ?? '').trim()
   if (sentence === '') throw new PlannerError('EMPTY_SENTENCE', '一句话不能为空')
   const maxAttempts = Math.max(1, Math.min(5, Math.floor(Number(opts.maxAttempts ?? 3))))
-  const timeoutMs = Number(opts.timeoutMs ?? 90_000)
+  // 总预算：树 + 全部子导图共用。面板给 180s、内部只给 90s 本身就是不一致，故默认给到 240s。
+  const totalBudget = Math.max(10_000, Number(opts.timeoutMs ?? 240_000))
   const maxTokens = Number(opts.maxTokens ?? 12_000)
+  const deadline = Date.now() + totalBudget
 
   let feedback = ''
   let lastProblem = ''
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const user = buildUserPrompt({ sentence, context: opts.context, feedback })
+    const user = buildUserPrompt({ sentence, context: opts.context, feedback, includeDesigns: false })
     const text = await callModel(opts.ctx, {
       system: PLAN_SYSTEM_PROMPT,
       user,
       signal: opts.signal,
-      timeoutMs,
+      timeoutMs: Math.max(1_000, Math.min(deadline - Date.now(), TREE_TIMEOUT_CAP)),
       maxTokens,
+      provider: opts.provider,
+      model: opts.model,
     })
 
     let raw: unknown
@@ -278,11 +314,101 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
       continue
     }
 
-    return built.plan
+    // 树先落地，子导图随后逐个生成：一次输出整棵大树会把模型的流打断。
+    return await withDesigns(built.plan, opts, deadline)
   }
 
   throw new PlannerError(
     'MODEL_OUTPUT_INVALID',
     '模型在 ' + String(maxAttempts) + ' 次尝试内都没给出合法计划。最后一次问题：\n' + lastProblem,
   )
+}
+
+/**
+ * 逐个任务生成子导图。
+ *
+ * 每个任务单独一次调用：输出小、流不容易断；某一张失败只降级（按验收标准与范围推导），
+ * 不让整棵计划作废——一张导图画不出来，不等于计划不对。
+ */
+async function withDesigns(tree: TreePlan, opts: GenerateOptions, deadline: number): Promise<Plan> {
+  const context = String(opts.context ?? '')
+  const wantModel = opts.designs !== false
+  for (const module of tree.modules) {
+    for (const task of module.tasks) {
+      if (task.design != null) continue
+      const left = deadline - Date.now()
+      if (!wantModel || left < DESIGN_MIN_BUDGET) {
+        // 预算不够（或调用方不要模型导图）：按任务自身推导，绝不编造 scope 之外的文件。
+        task.design = derivedDesign(task)
+        continue
+      }
+      task.design = await oneDesign(tree, task, opts, context, deadline)
+    }
+  }
+  // 最终形状要求每个任务都有导图（PlanTaskSchema.design 必填）——这里再兜一次。
+  const final = PlanSchema.safeParse(tree)
+  if (!final.success) {
+    throw new PlannerError(
+      'MODEL_OUTPUT_INVALID',
+      '生成的计划没能通过最终校验：\n- ' + formatIssues(final.error).join('\n- '),
+    )
+  }
+  return final.data
+}
+
+/** 一个任务的子导图：两次尝试，都失败就按任务本身推导一份（并说明是推导的）。 */
+async function oneDesign(
+  tree: TreePlan,
+  task: TreeTask,
+  opts: GenerateOptions,
+  context: string,
+  deadline: number,
+): Promise<TaskDesign> {
+  let feedback = ''
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const left = deadline - Date.now()
+    if (left < DESIGN_MIN_BUDGET) break
+    try {
+      const text = await callModel(opts.ctx, {
+        system: DESIGN_SYSTEM_PROMPT,
+        user: buildDesignPrompt({
+          goal: tree.plan.goal,
+          title: task.title,
+          acceptance: task.acceptance,
+          scope: task.scope,
+          context,
+          feedback,
+        }),
+        signal: opts.signal,
+        timeoutMs: Math.max(1_000, Math.min(left, DESIGN_TIMEOUT_CAP)),
+        maxTokens: 2000,
+        provider: opts.provider,
+        model: opts.model,
+      })
+      const raw = parseStrictJson(text)
+      const parsed = TaskDesignSchema.safeParse(raw)
+      if (parsed.success) return parsed.data
+      feedback = '上一次输出的子导图不符合要求：\n- ' + formatIssues(parsed.error).join('\n- ')
+    } catch (e) {
+      feedback = '上一次调用失败：' + (e instanceof Error ? e.message : String(e))
+    }
+  }
+  return derivedDesign(task)
+}
+
+/**
+ * 推导出来的子导图。
+ *
+ * 只用任务自己已有的信息（验收标准与范围），不编造模型没有说过的东西，并写明这是推导的。
+ */
+export function derivedDesign(task: { title: string; acceptance: string[]; scope: string[] }): TaskDesign {
+  const acceptance = task.acceptance.length > 0 ? task.acceptance : ['完成任务：' + task.title]
+  return {
+    summary: '（自动推导：模型这次没给出子导图，按验收标准与改动范围推导）' + task.title,
+    steps: acceptance.map((a) => '完成并验证：' + a),
+    // 只用任务自己的 scope：不编造范围之外的文件（编了会把 L4 漂移核对带偏）。
+    files: task.scope.slice(),
+    risks: [],
+    tests: acceptance.slice(),
+  }
 }

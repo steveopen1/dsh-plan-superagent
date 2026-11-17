@@ -294,6 +294,64 @@ function clip(s: string, n: number): string {
 }
 
 /**
+ * ===== 子导图（<project>/.plan-board/designs/<taskId>.json）=====
+ * 形状：{ summary, steps[], files[], risks[], tests[] }。
+ * 读时容错：字段缺失补空、类型不对当空数组、多出来的未知字段原样留着（回写时不丢）。
+ */
+interface PbDesign {
+  summary: string
+  steps: string[]
+  files: string[]
+  risks: string[]
+  tests: string[]
+  /** 未知字段：原样带回，别在编辑时悄悄吃掉。 */
+  extra: Record<string, unknown>
+}
+
+/** 子导图的规范字段名（其余都算「未知字段」）。 */
+const DESIGN_FIELDS = ['summary', 'steps', 'files', 'risks', 'tests']
+
+/** 任意 JSON → 规范形状（不崩：缺字段补空，类型不对当空，未知字段进 extra）。 */
+function normDesign(raw: unknown): PbDesign {
+  const o = (raw != null && typeof raw === 'object' && !Array.isArray(raw)) ? raw as Record<string, unknown> : {}
+  const extra: Record<string, unknown> = {}
+  for (const k of Object.keys(o)) if (!DESIGN_FIELDS.includes(k)) extra[k] = o[k]
+  return {
+    summary: typeof o.summary === 'string' ? o.summary : '',
+    steps: strArr(o.steps),
+    files: strArr(o.files),
+    risks: strArr(o.risks),
+    tests: strArr(o.tests),
+    extra,
+  }
+}
+
+/** 规范形状 → 回写形状（未知字段一起带回去）。 */
+function designToWire(d: PbDesign): Record<string, unknown> {
+  return {
+    summary: d.summary,
+    steps: d.steps,
+    files: d.files,
+    risks: d.risks,
+    tests: d.tests,
+    ...d.extra,
+  }
+}
+
+/** 空的子导图（给「新建」用）。 */
+function emptyDesign(): PbDesign {
+  return { summary: '', steps: [], files: [], risks: [], tests: [], extra: {} }
+}
+
+/**
+ * 任务的 note 里带 design-graph 指针 = 它有子导图。
+ * 不用额外接口就能知道「有没有」，点开时再拉内容。
+ */
+function hasDesignPointer(note: string | undefined): boolean {
+  return typeof note === 'string' && note.includes('design-graph:')
+}
+
+/**
  * ===== 计划板模式（原生对话框旁的开关） =====
  * 模式按会话存在服务端（会话重建、插件重启都不丢），前端只负责如实显示 + 切换。
  * 'plan' = 开发类需求先走计划板；'direct' = 按常规直接动手。
@@ -545,6 +603,13 @@ const CSS = [
   '.pb-deps{display:flex;flex-direction:column;gap:2px;max-height:150px;overflow:auto;border:1px solid var(--pb-line);border-radius:6px;padding:4px;background:var(--pb-bg)}',
   '.pb-deps .pb-deprow{font-size:11px}',
   '.pb-cycle{font-size:11px;font-weight:700;color:#ef4444;line-height:1.5}',
+  // ===== 子导图 =====
+  '.pb-designbar{display:flex;align-items:center;gap:8px;margin-top:2px}',
+  '.pb-design{border:1px dashed var(--pb-line);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:8px;background:rgba(100,116,139,.05)}',
+  '.pb-designsteps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px}',
+  '.pb-designsteps li{display:flex;gap:6px;align-items:center}',
+  '.pb-designsteps input{flex:1;min-width:0;font:11px/1.5 ui-monospace,monospace;padding:3px 6px;border-radius:6px;border:1px solid var(--pb-line);background:var(--pb-bg);color:var(--pb-ink)}',
+  '.pb-designextra{font:10px/1.4 ui-monospace,monospace;color:var(--pb-muted);white-space:pre-wrap;word-break:break-all;background:var(--pb-bg);border:1px solid var(--pb-line);border-radius:6px;padding:4px 6px;max-height:120px;overflow:auto}',
 ].join('\n')
 
 function ensureStyles(): void {
@@ -1026,6 +1091,11 @@ function PaneWindow(): ReturnType<typeof h> | null {
   const [apEdits, setApEdits] = useState<Record<string, PbOp[]>>({})
   const [apBusy, setApBusy] = useState('')
   const [apRev, setApRev] = useState(0)
+  // ===== 子导图（ designs/<taskId>.json ）=====
+  const [designOpen, setDesignOpen] = useState(false)
+  const [design, setDesign] = useState<PbDesign | null>(null)
+  const [designMsg, setDesignMsg] = useState('')
+  const [designBusy, setDesignBusy] = useState(false)
   // 依赖候选项 = 板子上的节点（提案新增的节点在渲染时再并进来）
   const depOptions = useMemo<DepOption[]>(() => (data?.board.nodes ?? []).map(n => ({ id: n.id, title: n.title, type: n.type })), [data])
   const [view, setView] = useState({ k: 1, tx: 0, ty: 0 })
@@ -1036,6 +1106,12 @@ function PaneWindow(): ReturnType<typeof h> | null {
     const t = setInterval(() => { const d = appDark(); setMode(prev => (prev === (d ? 'dark' : 'light') ? prev : (d ? 'dark' : 'light'))) }, 2000)
     return () => clearInterval(t)
   }, [])
+  // 换任务时把子导图收起来（不同任务的子导图不是一个东西）
+  useEffect(() => {
+    setDesignOpen(false)
+    setDesign(null)
+    setDesignMsg('')
+  }, [editorId])
   useEffect(() => {
     if (!open || !isAbsoluteProject(project)) return
     const ctrl = new AbortController()
@@ -1232,7 +1308,34 @@ function PaneWindow(): ReturnType<typeof h> | null {
     } catch (e) { setSaveMsg('⛔ ' + String(e)) }
     setSaving(false);
   };
-  const discard = (): void => { setDrafts({}); setAdded([]); setRemoved([]); setEditorId(null); setSaveMsg('') };
+  const discard = (): void => { setDrafts({}); setAdded([]); setRemoved([]); setEditorId(null); setSaveMsg('') }
+  // ===== 子导图：读 / 写都走服务端接口（浏览器不直接碰文件）=====
+  const loadDesign = async (taskId: string): Promise<void> => {
+    if (!isAbsoluteProject(project)) { setDesignMsg('⚠ 先在上面填项目根目录绝对路径'); return }
+    setDesignBusy(true)
+    setDesignMsg('')
+    try {
+      const r = await fetch(API + '/design?project=' + encodeURIComponent(project) + '&taskId=' + encodeURIComponent(taskId))
+      const j = await readJson(r)
+      if (j.ok !== true) { setDesignMsg('⛔ 读子导图失败：' + errText(j.error)); setDesign(null); return }
+      // design 为 null = 这个任务没有子导图（不是错误，显示一句说明即可）
+      setDesign(j.design == null ? null : normDesign(j.design))
+    } catch (e) { setDesignMsg('⛔ 读子导图失败：' + String(e)); setDesign(null) }
+    setDesignBusy(false)
+  }
+  const saveDesign = async (taskId: string): Promise<void> => {
+    if (design == null) return
+    setDesignBusy(true)
+    setDesignMsg('')
+    try {
+      const j = await post('/design', { project, taskId, design: designToWire(design) })
+      if (j.ok !== true) { setDesignMsg('⛔ 保存子导图失败：' + errText(j.error)); return }
+      setDesign(j.design == null ? design : normDesign(j.design))
+      setDesignMsg('✅ 子导图已保存')
+    } catch (e) { setDesignMsg('⛔ 保存子导图失败：' + String(e)) }
+    setDesignBusy(false)
+  }
+  const patchDesign = (p: Partial<PbDesign>): void => { setDesign(prev => (prev == null ? prev : { ...prev, ...p })) };
   // ===== 待批提案：确认时可带改过的 ops（服务端用提交的 ops 覆盖原提案再生效） =====
   const approveAp = async (ap: { id: string; ops: unknown[] }): Promise<void> => {
     const orig = normOps(ap.ops)
@@ -1302,6 +1405,57 @@ function PaneWindow(): ReturnType<typeof h> | null {
           } }),
           h('span', {}, '#' + (data?.order[dn.id] ?? '?') + ' ' + dn.id + ' ' + dn.title.slice(0, 22)))),
       ))
+    }
+    if (editor.type === 'task') {
+      // ===== 子导图入口（功能实现步骤/文件/风险/测试）=====
+      editorChildren.push(h('div', { className: 'pb-designbar' },
+        h('button', {
+          className: 'pb-btn pb-vio',
+          onClick: () => {
+            const next = !designOpen
+            setDesignOpen(next)
+            if (next) void loadDesign(editor.id)
+          },
+        }, designOpen ? '收起子导图' : '子导图' + (hasDesignPointer(fd.note ?? editor.note) ? ' ●' : '')),
+        h('span', { className: 'pb-hint' }, '功能实现子导图（步骤 / 涉及文件 / 风险 / 测试），存在 .plan-board/designs/' + editor.id + '.json'),
+      ))
+      if (designOpen) {
+        const d = design
+        editorChildren.push(h('div', { className: 'pb-design' },
+          designBusy && d == null ? h('div', { className: 'pb-hint' }, '读取子导图…') : null,
+          !designBusy && d == null
+            ? h('div', { className: 'pb-hint' }, '该任务没有子导图',
+                h('button', { className: 'pb-btn', style: { marginLeft: '8px' }, onClick: () => { setDesign(emptyDesign()); setDesignMsg('') } }, '新建空子导图'))
+            : null,
+          d != null ? h('div', { className: 'pb-form' },
+            h('label', {}, '概述',
+              h('textarea', { value: d.summary, onChange: (e: { target: { value: string } }) => patchDesign({ summary: e.target.value }) })),
+            h('div', { className: 'pb-oplabel' }, '步骤（有序）',
+              h('ol', { className: 'pb-designsteps' },
+                d.steps.map((s, i) => h('li', { key: 'ds' + i },
+                  h('input', {
+                    value: s,
+                    onChange: (e: { target: { value: string } }) => patchDesign({ steps: d.steps.map((x, k) => (k === i ? e.target.value : x)) }),
+                  }),
+                  h('button', { className: 'pb-btn', onClick: () => patchDesign({ steps: d.steps.filter((_, k) => k !== i) }) }, '删')))),
+              h('button', { className: 'pb-btn', onClick: () => patchDesign({ steps: [...d.steps, ''] }) }, '＋步骤')),
+            h('label', {}, '涉及文件（每行一条）',
+              h('textarea', { value: d.files.join('\n'), onChange: (e: { target: { value: string } }) => patchDesign({ files: splitLines(e.target.value) }) })),
+            h('label', {}, '风险（每行一条）',
+              h('textarea', { value: d.risks.join('\n'), onChange: (e: { target: { value: string } }) => patchDesign({ risks: splitLines(e.target.value) }) })),
+            h('label', {}, '怎么验（每行一条）',
+              h('textarea', { value: d.tests.join('\n'), onChange: (e: { target: { value: string } }) => patchDesign({ tests: splitLines(e.target.value) }) })),
+            Object.keys(d.extra).length > 0
+              ? h('div', { className: 'pb-oplabel' }, '其它字段（只读，保存时原样带回）',
+                  h('div', { className: 'pb-designextra' }, JSON.stringify(d.extra, null, 2)))
+              : null,
+            h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+              h('button', { className: 'pb-btn pb-ok', disabled: designBusy, onClick: () => { void saveDesign(editor.id) } }, designBusy ? '保存中…' : '保存子导图'),
+              designMsg !== '' ? h('span', { className: 'pb-hint' }, designMsg) : null),
+          ) : null,
+          d == null && designMsg !== '' ? h('div', { className: 'pb-hint' }, designMsg) : null,
+        ))
+      }
     }
     if (editor.type === 'module') {
       editorChildren.push(h('div', { style: { display: 'flex', gap: '6px' } },

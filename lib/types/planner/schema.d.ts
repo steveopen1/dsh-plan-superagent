@@ -65,11 +65,6 @@ export declare const PlanTaskSchema: z.ZodObject<{
         tests: string[];
     }>;
 }, "strict", z.ZodTypeAny, {
-    scope: string[];
-    id: string;
-    title: string;
-    acceptance: string[];
-    deps: string[];
     design: {
         summary: string;
         steps: string[];
@@ -77,13 +72,13 @@ export declare const PlanTaskSchema: z.ZodObject<{
         risks: string[];
         tests: string[];
     };
+    id: string;
+    scope: string[];
+    title: string;
+    acceptance: string[];
+    deps: string[];
     priority?: number | undefined;
 }, {
-    scope: string[];
-    id: string;
-    title: string;
-    acceptance: string[];
-    deps: string[];
     design: {
         summary: string;
         steps: string[];
@@ -91,6 +86,11 @@ export declare const PlanTaskSchema: z.ZodObject<{
         risks: string[];
         tests: string[];
     };
+    id: string;
+    scope: string[];
+    title: string;
+    acceptance: string[];
+    deps: string[];
     priority?: number | undefined;
 }>;
 export type PlanTask = z.infer<typeof PlanTaskSchema>;
@@ -124,11 +124,6 @@ export declare const PlanModuleSchema: z.ZodObject<{
             tests: string[];
         }>;
     }, "strict", z.ZodTypeAny, {
-        scope: string[];
-        id: string;
-        title: string;
-        acceptance: string[];
-        deps: string[];
         design: {
             summary: string;
             steps: string[];
@@ -136,13 +131,13 @@ export declare const PlanModuleSchema: z.ZodObject<{
             risks: string[];
             tests: string[];
         };
+        id: string;
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
         priority?: number | undefined;
     }, {
-        scope: string[];
-        id: string;
-        title: string;
-        acceptance: string[];
-        deps: string[];
         design: {
             summary: string;
             steps: string[];
@@ -150,17 +145,17 @@ export declare const PlanModuleSchema: z.ZodObject<{
             risks: string[];
             tests: string[];
         };
+        id: string;
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
         priority?: number | undefined;
     }>, "many">;
 }, "strict", z.ZodTypeAny, {
     id: string;
     title: string;
     tasks: {
-        scope: string[];
-        id: string;
-        title: string;
-        acceptance: string[];
-        deps: string[];
         design: {
             summary: string;
             steps: string[];
@@ -168,17 +163,17 @@ export declare const PlanModuleSchema: z.ZodObject<{
             risks: string[];
             tests: string[];
         };
+        id: string;
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
         priority?: number | undefined;
     }[];
 }, {
     id: string;
     title: string;
     tasks: {
-        scope: string[];
-        id: string;
-        title: string;
-        acceptance: string[];
-        deps: string[];
         design: {
             summary: string;
             steps: string[];
@@ -186,6 +181,11 @@ export declare const PlanModuleSchema: z.ZodObject<{
             risks: string[];
             tests: string[];
         };
+        id: string;
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
         priority?: number | undefined;
     }[];
 }>;
@@ -232,11 +232,6 @@ export declare const PlanSchema: z.ZodObject<{
                 tests: string[];
             }>;
         }, "strict", z.ZodTypeAny, {
-            scope: string[];
-            id: string;
-            title: string;
-            acceptance: string[];
-            deps: string[];
             design: {
                 summary: string;
                 steps: string[];
@@ -244,13 +239,13 @@ export declare const PlanSchema: z.ZodObject<{
                 risks: string[];
                 tests: string[];
             };
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
             priority?: number | undefined;
         }, {
-            scope: string[];
-            id: string;
-            title: string;
-            acceptance: string[];
-            deps: string[];
             design: {
                 summary: string;
                 steps: string[];
@@ -258,17 +253,17 @@ export declare const PlanSchema: z.ZodObject<{
                 risks: string[];
                 tests: string[];
             };
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
             priority?: number | undefined;
         }>, "many">;
     }, "strict", z.ZodTypeAny, {
         id: string;
         title: string;
         tasks: {
-            scope: string[];
-            id: string;
-            title: string;
-            acceptance: string[];
-            deps: string[];
             design: {
                 summary: string;
                 steps: string[];
@@ -276,17 +271,17 @@ export declare const PlanSchema: z.ZodObject<{
                 risks: string[];
                 tests: string[];
             };
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
             priority?: number | undefined;
         }[];
     }, {
         id: string;
         title: string;
         tasks: {
-            scope: string[];
-            id: string;
-            title: string;
-            acceptance: string[];
-            deps: string[];
             design: {
                 summary: string;
                 steps: string[];
@@ -294,6 +289,11 @@ export declare const PlanSchema: z.ZodObject<{
                 risks: string[];
                 tests: string[];
             };
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
             priority?: number | undefined;
         }[];
     }>, "many">;
@@ -306,11 +306,6 @@ export declare const PlanSchema: z.ZodObject<{
         id: string;
         title: string;
         tasks: {
-            scope: string[];
-            id: string;
-            title: string;
-            acceptance: string[];
-            deps: string[];
             design: {
                 summary: string;
                 steps: string[];
@@ -318,6 +313,11 @@ export declare const PlanSchema: z.ZodObject<{
                 risks: string[];
                 tests: string[];
             };
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
             priority?: number | undefined;
         }[];
     }[];
@@ -330,11 +330,6 @@ export declare const PlanSchema: z.ZodObject<{
         id: string;
         title: string;
         tasks: {
-            scope: string[];
-            id: string;
-            title: string;
-            acceptance: string[];
-            deps: string[];
             design: {
                 summary: string;
                 steps: string[];
@@ -342,23 +337,30 @@ export declare const PlanSchema: z.ZodObject<{
                 risks: string[];
                 tests: string[];
             };
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
             priority?: number | undefined;
         }[];
     }[];
 }>;
 export type Plan = z.infer<typeof PlanSchema>;
-/** 草稿 key：模型侧用的临时编号（模块 m1/m2、任务 t1/t2…），全局唯一。 */
-export declare const KEY_PATTERN: RegExp;
-export declare const KeySchema: z.ZodString;
-/** 模型侧 task（草稿 key 版）。 */
-export declare const RawTaskSchema: z.ZodEffects<z.ZodObject<{
-    key: z.ZodString;
+/**
+ * 树阶段的中间形状：任务还没有 design（第二段再补）。
+ *
+ * 为什么单独一种形状：最终计划里每个 task 都必须带导图（PlanTaskSchema.design 必填），
+ * 但树先落地、导图后补，中间态必须允许 design 缺省——否则第一段的产出根本过不了类型。
+ */
+export declare const TreeTaskSchema: z.ZodObject<{
+    id: z.ZodString;
     title: z.ZodString;
     acceptance: z.ZodArray<z.ZodString, "many">;
     scope: z.ZodArray<z.ZodString, "many">;
     deps: z.ZodArray<z.ZodString, "many">;
     priority: z.ZodOptional<z.ZodNumber>;
-    design: z.ZodObject<{
+    design: z.ZodOptional<z.ZodObject<{
         summary: z.ZodString;
         steps: z.ZodArray<z.ZodString, "many">;
         files: z.ZodArray<z.ZodString, "many">;
@@ -376,62 +378,47 @@ export declare const RawTaskSchema: z.ZodEffects<z.ZodObject<{
         files: string[];
         risks: string[];
         tests: string[];
-    }>;
+    }>>;
 }, "strict", z.ZodTypeAny, {
+    id: string;
     scope: string[];
     title: string;
     acceptance: string[];
     deps: string[];
-    design: {
+    design?: {
         summary: string;
         steps: string[];
         files: string[];
         risks: string[];
         tests: string[];
-    };
-    key: string;
+    } | undefined;
     priority?: number | undefined;
 }, {
+    id: string;
     scope: string[];
     title: string;
     acceptance: string[];
     deps: string[];
-    design: {
+    design?: {
         summary: string;
         steps: string[];
         files: string[];
         risks: string[];
         tests: string[];
-    };
-    key: string;
+    } | undefined;
     priority?: number | undefined;
-}>, {
-    scope: string[];
-    title: string;
-    acceptance: string[];
-    deps: string[];
-    design: {
-        summary: string;
-        steps: string[];
-        files: string[];
-        risks: string[];
-        tests: string[];
-    };
-    key: string;
-    priority?: number | undefined;
-}, unknown>;
-/** 模型侧 module（草稿 key 版）：里面只有 tasks，没有第四层。 */
-export declare const RawModuleSchema: z.ZodEffects<z.ZodObject<{
-    key: z.ZodString;
+}>;
+export declare const TreeModuleSchema: z.ZodObject<{
+    id: z.ZodString;
     title: z.ZodString;
-    tasks: z.ZodArray<z.ZodEffects<z.ZodObject<{
-        key: z.ZodString;
+    tasks: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
         title: z.ZodString;
         acceptance: z.ZodArray<z.ZodString, "many">;
         scope: z.ZodArray<z.ZodString, "many">;
         deps: z.ZodArray<z.ZodString, "many">;
         priority: z.ZodOptional<z.ZodNumber>;
-        design: z.ZodObject<{
+        design: z.ZodOptional<z.ZodObject<{
             summary: z.ZodString;
             steps: z.ZodArray<z.ZodString, "many">;
             files: z.ZodArray<z.ZodString, "many">;
@@ -449,48 +436,374 @@ export declare const RawModuleSchema: z.ZodEffects<z.ZodObject<{
             files: string[];
             risks: string[];
             tests: string[];
-        }>;
+        }>>;
     }, "strict", z.ZodTypeAny, {
+        id: string;
         scope: string[];
         title: string;
         acceptance: string[];
         deps: string[];
-        design: {
+        design?: {
             summary: string;
             steps: string[];
             files: string[];
             risks: string[];
             tests: string[];
-        };
+        } | undefined;
+        priority?: number | undefined;
+    }, {
+        id: string;
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
+        design?: {
+            summary: string;
+            steps: string[];
+            files: string[];
+            risks: string[];
+            tests: string[];
+        } | undefined;
+        priority?: number | undefined;
+    }>, "many">;
+}, "strict", z.ZodTypeAny, {
+    id: string;
+    title: string;
+    tasks: {
+        id: string;
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
+        design?: {
+            summary: string;
+            steps: string[];
+            files: string[];
+            risks: string[];
+            tests: string[];
+        } | undefined;
+        priority?: number | undefined;
+    }[];
+}, {
+    id: string;
+    title: string;
+    tasks: {
+        id: string;
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
+        design?: {
+            summary: string;
+            steps: string[];
+            files: string[];
+            risks: string[];
+            tests: string[];
+        } | undefined;
+        priority?: number | undefined;
+    }[];
+}>;
+export declare const TreeSchema: z.ZodObject<{
+    plan: z.ZodObject<{
+        name: z.ZodString;
+        goal: z.ZodString;
+    }, "strict", z.ZodTypeAny, {
+        name: string;
+        goal: string;
+    }, {
+        name: string;
+        goal: string;
+    }>;
+    modules: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        title: z.ZodString;
+        tasks: z.ZodArray<z.ZodObject<{
+            id: z.ZodString;
+            title: z.ZodString;
+            acceptance: z.ZodArray<z.ZodString, "many">;
+            scope: z.ZodArray<z.ZodString, "many">;
+            deps: z.ZodArray<z.ZodString, "many">;
+            priority: z.ZodOptional<z.ZodNumber>;
+            design: z.ZodOptional<z.ZodObject<{
+                summary: z.ZodString;
+                steps: z.ZodArray<z.ZodString, "many">;
+                files: z.ZodArray<z.ZodString, "many">;
+                risks: z.ZodArray<z.ZodString, "many">;
+                tests: z.ZodArray<z.ZodString, "many">;
+            }, "strict", z.ZodTypeAny, {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            }, {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            }>>;
+        }, "strict", z.ZodTypeAny, {
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
+            design?: {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            } | undefined;
+            priority?: number | undefined;
+        }, {
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
+            design?: {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            } | undefined;
+            priority?: number | undefined;
+        }>, "many">;
+    }, "strict", z.ZodTypeAny, {
+        id: string;
+        title: string;
+        tasks: {
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
+            design?: {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            } | undefined;
+            priority?: number | undefined;
+        }[];
+    }, {
+        id: string;
+        title: string;
+        tasks: {
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
+            design?: {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            } | undefined;
+            priority?: number | undefined;
+        }[];
+    }>, "many">;
+}, "strict", z.ZodTypeAny, {
+    plan: {
+        name: string;
+        goal: string;
+    };
+    modules: {
+        id: string;
+        title: string;
+        tasks: {
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
+            design?: {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            } | undefined;
+            priority?: number | undefined;
+        }[];
+    }[];
+}, {
+    plan: {
+        name: string;
+        goal: string;
+    };
+    modules: {
+        id: string;
+        title: string;
+        tasks: {
+            id: string;
+            scope: string[];
+            title: string;
+            acceptance: string[];
+            deps: string[];
+            design?: {
+                summary: string;
+                steps: string[];
+                files: string[];
+                risks: string[];
+                tests: string[];
+            } | undefined;
+            priority?: number | undefined;
+        }[];
+    }[];
+}>;
+export type TreePlan = z.infer<typeof TreeSchema>;
+export type TreeTask = z.infer<typeof TreeTaskSchema>;
+/** 草稿 key：模型侧用的临时编号（模块 m1/m2、任务 t1/t2…），全局唯一。 */
+export declare const KEY_PATTERN: RegExp;
+export declare const KeySchema: z.ZodString;
+/** 模型侧 task（草稿 key 版）。 */
+export declare const RawTaskSchema: z.ZodEffects<z.ZodObject<{
+    key: z.ZodString;
+    title: z.ZodString;
+    acceptance: z.ZodArray<z.ZodString, "many">;
+    scope: z.ZodArray<z.ZodString, "many">;
+    deps: z.ZodArray<z.ZodString, "many">;
+    priority: z.ZodOptional<z.ZodNumber>;
+    design: z.ZodOptional<z.ZodObject<{
+        summary: z.ZodString;
+        steps: z.ZodArray<z.ZodString, "many">;
+        files: z.ZodArray<z.ZodString, "many">;
+        risks: z.ZodArray<z.ZodString, "many">;
+        tests: z.ZodArray<z.ZodString, "many">;
+    }, "strict", z.ZodTypeAny, {
+        summary: string;
+        steps: string[];
+        files: string[];
+        risks: string[];
+        tests: string[];
+    }, {
+        summary: string;
+        steps: string[];
+        files: string[];
+        risks: string[];
+        tests: string[];
+    }>>;
+}, "strict", z.ZodTypeAny, {
+    scope: string[];
+    title: string;
+    acceptance: string[];
+    deps: string[];
+    key: string;
+    design?: {
+        summary: string;
+        steps: string[];
+        files: string[];
+        risks: string[];
+        tests: string[];
+    } | undefined;
+    priority?: number | undefined;
+}, {
+    scope: string[];
+    title: string;
+    acceptance: string[];
+    deps: string[];
+    key: string;
+    design?: {
+        summary: string;
+        steps: string[];
+        files: string[];
+        risks: string[];
+        tests: string[];
+    } | undefined;
+    priority?: number | undefined;
+}>, {
+    scope: string[];
+    title: string;
+    acceptance: string[];
+    deps: string[];
+    key: string;
+    design?: {
+        summary: string;
+        steps: string[];
+        files: string[];
+        risks: string[];
+        tests: string[];
+    } | undefined;
+    priority?: number | undefined;
+}, unknown>;
+/** 模型侧 module（草稿 key 版）：里面只有 tasks，没有第四层。 */
+export declare const RawModuleSchema: z.ZodEffects<z.ZodObject<{
+    key: z.ZodString;
+    title: z.ZodString;
+    tasks: z.ZodArray<z.ZodEffects<z.ZodObject<{
+        key: z.ZodString;
+        title: z.ZodString;
+        acceptance: z.ZodArray<z.ZodString, "many">;
+        scope: z.ZodArray<z.ZodString, "many">;
+        deps: z.ZodArray<z.ZodString, "many">;
+        priority: z.ZodOptional<z.ZodNumber>;
+        design: z.ZodOptional<z.ZodObject<{
+            summary: z.ZodString;
+            steps: z.ZodArray<z.ZodString, "many">;
+            files: z.ZodArray<z.ZodString, "many">;
+            risks: z.ZodArray<z.ZodString, "many">;
+            tests: z.ZodArray<z.ZodString, "many">;
+        }, "strict", z.ZodTypeAny, {
+            summary: string;
+            steps: string[];
+            files: string[];
+            risks: string[];
+            tests: string[];
+        }, {
+            summary: string;
+            steps: string[];
+            files: string[];
+            risks: string[];
+            tests: string[];
+        }>>;
+    }, "strict", z.ZodTypeAny, {
+        scope: string[];
+        title: string;
+        acceptance: string[];
+        deps: string[];
         key: string;
+        design?: {
+            summary: string;
+            steps: string[];
+            files: string[];
+            risks: string[];
+            tests: string[];
+        } | undefined;
         priority?: number | undefined;
     }, {
         scope: string[];
         title: string;
         acceptance: string[];
         deps: string[];
-        design: {
+        key: string;
+        design?: {
             summary: string;
             steps: string[];
             files: string[];
             risks: string[];
             tests: string[];
-        };
-        key: string;
+        } | undefined;
         priority?: number | undefined;
     }>, {
         scope: string[];
         title: string;
         acceptance: string[];
         deps: string[];
-        design: {
+        key: string;
+        design?: {
             summary: string;
             steps: string[];
             files: string[];
             risks: string[];
             tests: string[];
-        };
-        key: string;
+        } | undefined;
         priority?: number | undefined;
     }, unknown>, "many">;
 }, "strict", z.ZodTypeAny, {
@@ -500,14 +813,14 @@ export declare const RawModuleSchema: z.ZodEffects<z.ZodObject<{
         title: string;
         acceptance: string[];
         deps: string[];
-        design: {
+        key: string;
+        design?: {
             summary: string;
             steps: string[];
             files: string[];
             risks: string[];
             tests: string[];
-        };
-        key: string;
+        } | undefined;
         priority?: number | undefined;
     }[];
     key: string;
@@ -522,14 +835,14 @@ export declare const RawModuleSchema: z.ZodEffects<z.ZodObject<{
         title: string;
         acceptance: string[];
         deps: string[];
-        design: {
+        key: string;
+        design?: {
             summary: string;
             steps: string[];
             files: string[];
             risks: string[];
             tests: string[];
-        };
-        key: string;
+        } | undefined;
         priority?: number | undefined;
     }[];
     key: string;
@@ -556,7 +869,7 @@ export declare const RawPlanSchema: z.ZodObject<{
             scope: z.ZodArray<z.ZodString, "many">;
             deps: z.ZodArray<z.ZodString, "many">;
             priority: z.ZodOptional<z.ZodNumber>;
-            design: z.ZodObject<{
+            design: z.ZodOptional<z.ZodObject<{
                 summary: z.ZodString;
                 steps: z.ZodArray<z.ZodString, "many">;
                 files: z.ZodArray<z.ZodString, "many">;
@@ -574,48 +887,48 @@ export declare const RawPlanSchema: z.ZodObject<{
                 files: string[];
                 risks: string[];
                 tests: string[];
-            }>;
+            }>>;
         }, "strict", z.ZodTypeAny, {
             scope: string[];
             title: string;
             acceptance: string[];
             deps: string[];
-            design: {
+            key: string;
+            design?: {
                 summary: string;
                 steps: string[];
                 files: string[];
                 risks: string[];
                 tests: string[];
-            };
-            key: string;
+            } | undefined;
             priority?: number | undefined;
         }, {
             scope: string[];
             title: string;
             acceptance: string[];
             deps: string[];
-            design: {
+            key: string;
+            design?: {
                 summary: string;
                 steps: string[];
                 files: string[];
                 risks: string[];
                 tests: string[];
-            };
-            key: string;
+            } | undefined;
             priority?: number | undefined;
         }>, {
             scope: string[];
             title: string;
             acceptance: string[];
             deps: string[];
-            design: {
+            key: string;
+            design?: {
                 summary: string;
                 steps: string[];
                 files: string[];
                 risks: string[];
                 tests: string[];
-            };
-            key: string;
+            } | undefined;
             priority?: number | undefined;
         }, unknown>, "many">;
     }, "strict", z.ZodTypeAny, {
@@ -625,14 +938,14 @@ export declare const RawPlanSchema: z.ZodObject<{
             title: string;
             acceptance: string[];
             deps: string[];
-            design: {
+            key: string;
+            design?: {
                 summary: string;
                 steps: string[];
                 files: string[];
                 risks: string[];
                 tests: string[];
-            };
-            key: string;
+            } | undefined;
             priority?: number | undefined;
         }[];
         key: string;
@@ -647,14 +960,14 @@ export declare const RawPlanSchema: z.ZodObject<{
             title: string;
             acceptance: string[];
             deps: string[];
-            design: {
+            key: string;
+            design?: {
                 summary: string;
                 steps: string[];
                 files: string[];
                 risks: string[];
                 tests: string[];
-            };
-            key: string;
+            } | undefined;
             priority?: number | undefined;
         }[];
         key: string;
@@ -671,14 +984,14 @@ export declare const RawPlanSchema: z.ZodObject<{
             title: string;
             acceptance: string[];
             deps: string[];
-            design: {
+            key: string;
+            design?: {
                 summary: string;
                 steps: string[];
                 files: string[];
                 risks: string[];
                 tests: string[];
-            };
-            key: string;
+            } | undefined;
             priority?: number | undefined;
         }[];
         key: string;

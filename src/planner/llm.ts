@@ -9,6 +9,10 @@
  *
  * 与 mind-canvas 的差别：这里不做 extractJson 暴力切片（正文带花括号会切错），
  * JSON 解析在 generate.ts 里用严格 JSON.parse + zod 校验完成。
+ *
+ * 超时为什么不能只靠 abort：provider 未必理会 abort signal —— 光发信号不等于这次调用会结束，
+ * 流可能一直挂着（实测 Anthropic 兼容流会这样）。所以超时/取消必须**主动打断等待**：
+ * 把「prepareCall + 读流」放进一个 promise，用 race 兜住它。
  */
 import { randomUUID } from 'node:crypto'
 import { PlannerError } from './schema.js'
@@ -73,6 +77,44 @@ export function currentSelection(ctx: unknown): LlmSelection | null {
   }
 }
 
+/**
+ * 用超时与取消去打断一次等待。
+ *
+ * 超时到点时同时 abort 控制器（让 provider 停止生成，省 token），
+ * 并**直接 reject**——不等 provider 会不会理会 abort。
+ */
+function raceWithLimits(
+  work: Promise<string>,
+  timeoutMs: number,
+  external: AbortSignal | undefined,
+  controller: AbortController,
+): Promise<string> {
+  const guards: Array<Promise<never>> = []
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let onAbort: (() => void) | null = null
+  if (timeoutMs > 0) {
+    guards.push(new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort(new Error('模型调用超时'))
+        reject(new PlannerError('MODEL_TIMEOUT', '模型调用超时（' + String(timeoutMs) + 'ms）'))
+      }, timeoutMs)
+    }))
+  }
+  if (external != null) {
+    guards.push(new Promise<never>((_, reject) => {
+      const handler = (): void => reject(new PlannerError('ABORTED', '模型调用已取消'))
+      onAbort = handler
+      if (external.aborted) handler()
+      else external.addEventListener('abort', handler, { once: true })
+    }))
+  }
+  if (guards.length === 0) return work
+  return Promise.race([work, ...guards]).finally(() => {
+    if (timer != null) clearTimeout(timer)
+    if (onAbort != null && external != null) external.removeEventListener('abort', onAbort)
+  })
+}
+
 /** 调一次模型，返回完整文本。 */
 export async function callModel(ctx: unknown, req: CallModelRequest): Promise<string> {
   // An explicit provider/model wins over the host default: the default model's stream can break on
@@ -87,9 +129,8 @@ export async function callModel(ctx: unknown, req: CallModelRequest): Promise<st
     throw new PlannerError('NO_LLM', '宿主 llm 服务不可用：ctx.get("llm") 没拿到可用的 prepareCall')
   }
 
-  // 超时与取消：外部 signal + 内部超时合成一个 signal 交给 prepareCall/stream。
+  // 取消：外部 signal 合成一个控制器信号，交给 prepareCall/stream。
   const controller = new AbortController()
-  let timedOut = false
   const external = req.signal
   const onExternalAbort = (): void => { controller.abort(external?.reason) }
   if (external != null) {
@@ -97,39 +138,38 @@ export async function callModel(ctx: unknown, req: CallModelRequest): Promise<st
     else external.addEventListener('abort', onExternalAbort, { once: true })
   }
   const timeoutMs = Number(req.timeoutMs ?? 0)
-  const timer: ReturnType<typeof setTimeout> | null = timeoutMs > 0
-    ? setTimeout(() => { timedOut = true; controller.abort(new Error('模型调用超时')) }, timeoutMs)
-    : null
 
-  try {
+  // 干活的这段单独成一个 promise，外面用 race 兜住「流挂死」。
+  const work = (async () => {
     const call = await llm.prepareCall(
       { provider: selection.provider, model: selection.model, maxTokens: req.maxTokens ?? 12_000 },
       controller.signal,
     )
     let text = ''
-    const stream = call.stream({
+    for await (const chunk of call.stream({
       ...(call.config ?? {}),
       system: req.system,
       messages: [{ role: 'user', content: [{ type: 'text', text: req.user }], source: { kind: 'dsh-plan-superagent' } }],
       sessionId: req.sessionId ?? PLANNER_SESSION_ID,
       signal: controller.signal,
-    })
-    for await (const chunk of stream) {
+    })) {
       if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
         text += chunk.text
       } else if (chunk.type === 'finish' && (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted')) {
         throw new PlannerError('MODEL_ERROR', chunk.reason?.failure?.message ?? '模型调用失败')
       }
     }
-    if (timedOut) throw new PlannerError('MODEL_TIMEOUT', '模型调用超时（' + String(timeoutMs) + 'ms）')
-    if (external?.aborted === true) throw new PlannerError('ABORTED', '模型调用已取消')
     return text
+  })()
+  // race 输了之后这条流可能自己报错：先挂一个空处理器，避免未处理拒绝把进程带崩。
+  work.catch(() => { /* 被放弃的流 */ })
+
+  try {
+    return await raceWithLimits(work, timeoutMs, external, controller)
   } catch (e) {
     if (e instanceof PlannerError) throw e
-    if (timedOut) throw new PlannerError('MODEL_TIMEOUT', '模型调用超时（' + String(timeoutMs) + 'ms）')
     throw new PlannerError('MODEL_ERROR', e instanceof Error ? e.message : String(e))
   } finally {
-    if (timer != null) clearTimeout(timer)
     if (external != null) external.removeEventListener('abort', onExternalAbort)
   }
 }

@@ -50,6 +50,6 @@ export function applyBridge(ctx: Context): void {
 
 export { planboardKind, PLANBOARD_HEALTH, PLANBOARD_KIND, PLANBOARD_ACTOR_DEFAULT } from './source.js'
 export { planboardBrief, planboardTrigger, planboardTriggerId, planboardThreadId, designFilePaths, readDesignSummary, summarizeDesign } from './trigger.js'
-export { pollPlanboard, watchPlanboard, evidenceOf, KV_DISPATCHED, KV_SETTLED } from './watch.js'
+export { pollPlanboard, watchPlanboard, evidenceOf, describePoll, doingTasks, reconcileUnmatched, RECONCILE_GRACE_MS, KV_DISPATCHED, KV_SETTLED, KV_RECONCILE } from './watch.js'
 export type { PlanboardConfig } from './source.js'
 export type { Trigger, SourceContext, SourceKind } from './contract.js'

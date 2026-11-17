@@ -14,8 +14,39 @@ export interface PromptInput {
     context?: string;
     /** 上一轮的校验错误（重试时追加，让模型自己改）。 */
     feedback?: string;
+    /**
+     * 是否在这一轮里就要子导图。
+     *
+     * 一次输出整棵树加全部子导图的 JSON 太大，模型的长流会断（实测 Anthropic 兼容流
+     * 「stream ended without a stop reason」）。默认分开：先出树，再逐任务出子导图。
+     */
+    includeDesigns?: boolean;
 }
 /** 系统提示词：只输出 JSON。 */
+/**
+ * 系统提示词：只输出 JSON。
+ *
+ * 这一轮**只出树**（plan → modules → tasks）：子导图由后面逐任务的独立调用补。
+ * 一次输出整棵树加全部子导图会把模型的流打断（实测 Anthropic 兼容流半路断）。
+ */
 export declare const PLAN_SYSTEM_PROMPT: string;
 /** 组装 user 提示词。 */
 export declare function buildUserPrompt(input: PromptInput): string;
+/** 为单个任务写子导图时的系统提示词。 */
+export declare const DESIGN_SYSTEM_PROMPT: string;
+export interface DesignPromptInput {
+    /** 计划目标（让子导图与整体一致）。 */
+    goal: string;
+    /** 任务标题。 */
+    title: string;
+    /** 验收标准（子导图要能把它变成可执行的步骤）。 */
+    acceptance: string[];
+    /** 允许改动的范围。 */
+    scope: string[];
+    /** 目标仓库上下文（可选）。 */
+    context?: string;
+    /** 上一轮子导图的错误（重试时追加，让模型自己改）。 */
+    feedback?: string;
+}
+/** 单个任务的子导图提示词：只要五个字段的 JSON。 */
+export declare function buildDesignPrompt(input: DesignPromptInput): string;

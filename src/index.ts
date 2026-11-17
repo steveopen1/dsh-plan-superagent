@@ -142,6 +142,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): () => void {
       },
       // The board governs only the sessions that turned the plan-board mode on.
       isPlanMode: (agentId) => (agentId == null ? false : modeStore.get(agentId)?.mode === 'plan'),
+      designDir: cfg.subDesignDir,
     })
     if (typeof disposeBoard === 'function') disposers.push(disposeBoard)
   } catch (error) {

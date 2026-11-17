@@ -10,14 +10,23 @@
       └────── 回写证据 ◄────────┴──────── 工单结束 ◄──────────────────┘
 ```
 
+## 真相源与同步方向（先读这一段）
+
+**板 = 任务真相源，引擎 = 执行真相源，桥 = 单向同步 + 一个显式派发动作。**
+板→引擎只有「派发一个 ready 任务」一个动作，引擎→板只有「结果回写」一条路径；
+谁写哪个字段的唯一来源清单、回环审查结论、单发号（L1）与 reconcile 规则，
+都写在 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+
 ## 文件
 
 | 文件 | 职责 |
 | --- | --- |
-| `contract.ts` | 引擎契约的**本地结构化副本**（SourceKind / SourceContext / Trigger / Ticket / Health / KV），外加一个 zod 兼容的最小 schema 子集 |
+| `contract.ts` | 引擎契约的**本地结构化副本**（SourceKind / SourceContext / Trigger / Ticket / Health / KV），外加一个 zod 兼容的最小 schema 子集；文件末尾还有一份**运行时可见的字段名清单**（副本与引擎的比对依据） |
+| `contract-check.ts` | 副本一致性检查：把桥的字段名清单与引擎的 `SOURCE_CONTRACT`（`dsh-superagent/contract`）逐项比对，返回**不一致清单**；并负责找到引擎的契约模块 |
 | `trigger.ts` | 板任务 → Trigger 的翻译（稳定 id、thread、actor、简报正文、子导图摘要） |
 | `source.ts` | `planboardKind`：配置 schema、面板字段、健康条目、范围、策略、回写通道、执行环境变量 |
-| `watch.ts` | 轮询循环：读板 → 派单 → 收单 → 回写证据（幂等、失败不循环） |
+| `watch.ts` | 轮询循环：读板 → 派单 → 收单 → 回写证据（幂等、失败不循环、单发号 L1、reconcile） |
+| `ARCHITECTURE.md` | 三方职责、唯一写入来源清单、回环审查、单发号与 reconcile 规则 |
 | `index.ts` | 宿主入口 `applyBridge(ctx)`：嵌套 `ctx.inject(['orchestrator'], cb)` |
 
 ## 与引擎的接口点
@@ -64,6 +73,39 @@
 3. **未结束不重发**：任务已有工单且工单还没结束 → 本轮不再派。
 4. **收单不重复**：已回写过的工单 id 记在 `planboard-bridge:settled` 里，不再回写第二次。
 5. **回写幂等**：通道回写用消息 id 做标记，同一条消息不会写进备注两遍。
+
+## 单发号（L1）：桥自己限流
+
+板上同一时刻只允许一个 doing 任务（板工具 `plan_next` 的 L1 硬锁）。桥派单前先看板上有没有
+doing 任务，有就不派；没有时只派**一个**，派出去它立刻变 doing，锁随之被占住，
+下一个任务等这一轮收卷后再派。判定口径与板工具 `plan_next` 完全一致（`doingTasks()`），
+不依赖引擎的 maxWorkers——那是执行并发，管不了「板上同时有几个 doing」，
+而 L1/L4/L7 的判定基准都以「当前 doing 任务」为准。
+
+派出去却始终没有工单的（策略不放行、评估没接受）：宽限期后这次尝试作废，
+任务从 `doing` 放回 `blocked`——不放回去的话，锁会被一个根本没有工单的任务一直占着。
+
+## reconcile 检查
+
+板上有 ready 任务、引擎里没有对应的在途工单、且这个状态持续超过 **90 秒**
+（`RECONCILE_GRACE_MS`）→ 健康条目里出现提示：
+
+> 板上有 N 个 ready 任务但引擎里没有对应工单，可能派发失败
+
+锁被占着（等锁是正常状态）或该任务有在途尝试时不算异常。提示走引擎已有的健康条目机制
+（`ctx.report('planboard', …)`），不新造通道；健康状态仍是 `ready`——这是「要人看一眼」，
+不是引擎故障。
+
+## 自测
+
+```powershell
+node scripts/bridge-selftest.mjs        # 桥的行为（L1、reconcile、回写、单向同步）
+node scripts/bridge-contract-selftest.mjs   # 副本一致性（桥的契约 vs 引擎现在的契约）
+```
+
+不引新依赖：脚本用包内的 typescript 把 `src/bridge/**` 与它用到的几个 `src/board/**`
+编译到临时目录，再用 node 跑断言（L1 单发号、reconcile 文案与宽限期、单向同步无回环、
+幂等与证据门）。改动这些语义时必须同步改这里的用例。
 
 ## 回写路径（证据门）
 
@@ -118,11 +160,24 @@ PlanStore.open(project)            ← 重新读盘（板工具可能在另一�
 | `Key` / `family` 形态 | 引擎 `src/kv.ts` | KV 写入的键名不对 → 台账丢失 |
 | kind 的 schema 用法 | 引擎 `src/sources/registry.ts` | 只用 `parse` / `safeParse`；若引擎改成别的 API，`contract.ts` 的 schema 子集要跟着改 |
 
+**这些现在由脚本守着，不用靠人肉逐项对**：`scripts/bridge-contract-selftest.mjs` 会
+
+1. 找到引擎的契约模块（`DSH_SUPERAGENT_CONTRACT_MODULE` → 已安装的依赖 `dsh-superagent/contract` → 同机的引擎仓 `../dsh-superagent-win/lib/contract.js`）；
+2. 把桥的字段名清单与引擎的 `SOURCE_CONTRACT` 逐项比对（引擎要求的字段桥必须有；桥抄的字段引擎必须还有）；
+3. 检查桥那个 `planboardKind` 的实现是否仍满足引擎现在的要求；
+4. 检查桥的 mini-schema 与引擎依赖的语义一致（填默认值、拒绝未知键、`safeParse` 不抛）；
+5. **反向对照**：故意把契约改坏（模拟引擎升版改名）时，比对必须报得出来——否则上面那些「绿」只是自欺欺人。
+
+引擎升版后只要跑一次这个脚本，红了就知道该改哪一处；改完桥的副本，脚本转绿。
+
 ## 已知限制
 
-- **一次可发多张单**：桥把每个就绪任务都变成一张工单（不守板子交互式 `plan_next` 的 L1 单发号锁）。
-  板子此时会有多个 `doing` 任务，`plan_next` 会拒绝再发号——这是有意的（工单并发由引擎的
-  `maxWorkers` 管）。
+- **一次只发一张单**：桥守板的发号语义（L1），同一块同一时刻只有一个 doing 任务。
+  与 `maxWorkers=1` 的差别：以前第二个任务的工单会**立刻建出来**在引擎里排队，
+  现在等第一个任务收卷后再建——结果一样（第二个任务照样被做掉），区别是引擎里同时只有一张单，
+  板上也不会出现多个 doing（否则 L1/L4/L7 的判定基准会分裂）。
+- **派发失败会挂起任务**：派出去却始终没有工单（策略不放行、评估没接受），
+  宽限期后任务落 `blocked` 等人处置，桥不自己无限重试。
 - **子导图格式未固定**：`designs/<taskId>.json` 的结构由上游约定，桥只做保守的字符串抽取
   （按 `title`/`name`/`label`/`summary` 等常见键收集要点，最多 12 条）。文件缺失或解析失败时
   简报只给验收与范围，不打断派单。

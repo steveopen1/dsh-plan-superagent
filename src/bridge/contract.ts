@@ -1,6 +1,16 @@
 /**
  * dsh-superagent 契约的**本地结构化副本**（Source 插件侧最小可用集）。
  *
+ * ## ⚠ 这是一份**临时**副本，不是设计
+ *
+ * 上游一旦把 Source 插件契约抽成公开的契约包（计划 **t-1**），本文件**整体删除**，
+ * 改成直接 import 上游的契约类型即可。在那之前它只是「引擎的类型面对外拿不到」的权宜之计：
+ * 宁可显式抄一份、能逐字对照，也不要让整个包拖着一个发不了版的引擎当类型依赖。
+ *
+ * 所以抄的时候只抄**桥真正用到的那些形状**（BRIDGE_READS 那张清单就是桥读到的字段面，
+ * 引擎升版时最该盯的就是那几处字段名；计划 **t-2** 的契约守卫测试照这张清单写），
+ * 抄不到的、抄了也用不上的，宁可留空也不要凭印象补。
+ *
  * ## 为什么不能直接 import dsh-superagent 的类型
  *
  * `dsh-superagent` 是 `private: true` 的未发布包：它不在任何 npm registry 上，也没有
@@ -134,12 +144,26 @@ export type Deployment = unknown
 export type Key<V> = string & { readonly __value?: V }
 /** 同前缀的键族。 */
 export type Family<V, A extends unknown[]> = ((...name: A) => Key<V>) & { readonly prefix: string }
+/**
+ * 桥真正读到的契约面（其余字段只是类型上的传递依赖）。
+ *
+ * 引擎升版时最该盯的就是这几处字段名：触发器的 id/text/meta/threads/actor、
+ * 工单的 ended/assignments/origin/mandate、健康条目的 state/detail/code。
+ * 计划 t-2 的契约守卫测试就照这张清单写。
+ *
+ * 与文件末尾那组常量的分工：`BRIDGE_*_FIELDS` 是**穷举**字段面（配 `Assert<Equals<keyof X, ...>>`
+ * 编译期断言，引擎给类型加字段就会红）；`BRIDGE_USED_*` 是**运行时真正读到**的那几个成员。
+ * 本清单是桥与引擎之间**流转**的字段面：既包含桥读回来的，也包含桥写过去的
+ * （触发器的 actor/text/human/at 是桥填进去的）。
+ */
+export const BRIDGE_READS = [
+  'Trigger.id', 'Trigger.text', 'Trigger.meta', 'Trigger.threads', 'Trigger.actor', 'Trigger.human', 'Trigger.at',
+  'Ticket.id', 'Ticket.title', 'Ticket.ended', 'Ticket.assignments', 'Ticket.origin', 'Ticket.mandate', 'Ticket.execution',
+  'Health.state', 'Health.detail', 'Health.code',
+] as const
+
 /** 定义一个带类型的 KV 键（外部来源插件用这个自己声明键）。 */
 export const record = <V>(key: string): Key<V> => key as Key<V>
-/** 定义一个键族，键名以 `prefix` 开头。 */
-export function family<V, A extends unknown[] = [string]>(prefix: string, format = (...name: A) => name.join(':')): Family<V, A> {
-  return Object.assign((...name: A) => `${prefix}${format(...name)}` as Key<V>, { prefix })
-}
 
 /** 稳定内容派生 id：同样的输入永远得到同样的 id（引擎 `core/ids.ts` 的 `key()`）。 */
 export function stableKey(...values: string[]): string {
@@ -227,30 +251,6 @@ export function num(opts: { int?: boolean; min?: number; max?: number; default?:
     if (opts.min != null && value < opts.min) throw new SchemaError(`expected at least ${opts.min}`)
     if (opts.max != null && value > opts.max) throw new SchemaError(`expected at most ${opts.max}`)
     return value
-  })
-}
-/** 布尔字段。 */
-export function bool(opts: { default?: boolean | (() => boolean) } = {}): SchemaLike<boolean> {
-  return makeSchema<boolean>((value) => {
-    if (value === undefined) {
-      const fallback = defaultOf(opts.default)
-      if (fallback === undefined) throw new SchemaError('expected a boolean')
-      return fallback
-    }
-    if (typeof value !== 'boolean') throw new SchemaError('expected a boolean')
-    return value
-  })
-}
-/** 枚举字段。 */
-export function enumOf<T extends string>(values: readonly T[], opts: { default?: T | (() => T) } = {}): SchemaLike<T> {
-  return makeSchema<T>((value) => {
-    if (value === undefined) {
-      const fallback = defaultOf(opts.default)
-      if (fallback === undefined) throw new SchemaError('expected one of ' + values.join(', '))
-      return fallback
-    }
-    if (typeof value !== 'string' || !values.includes(value as T)) throw new SchemaError('expected one of ' + values.join(', '))
-    return value as T
   })
 }
 /** 可选字段：缺省即 undefined，不报错。 */
@@ -394,3 +394,69 @@ export interface SourceHost {
   /** 某个来源的上下文；它的 `report` 只会写该来源声明过的健康条目。 */
   context(kind: { kind: string; health: readonly string[] }): SourceContext
 }
+
+/* ------------------------------------------------------------------ *
+ * 副本一致性（运行时可见的字段名）
+ *
+ * 为什么接口之外还要落一份运行时数据：接口只在**编译期**存在，而真正会失配的那一侧是
+ * 「引擎改了字段名、桥这边还拿着旧副本」——对编译器来说两边都自洽，毫无异常；故障发生在运行时：
+ * 宿主对不认识的字段是消费者 fall through，于是桥读到 undefined，面板不翻译、评估读不到、
+ * 一切照旧运行，只是什么都不发生。
+ *
+ * 所以把「这份副本认识哪些字段」落成数据，自测（scripts/bridge-contract-selftest.mjs）拿它跟
+ * 引擎的 `SOURCE_CONTRACT`（`dsh-superagent/contract`）逐项对比：引擎改名 → 对比变红 → 桥跟上。
+ * ------------------------------------------------------------------ */
+
+/** 桥这份副本认识的 Source kind 字段。 */
+export const BRIDGE_SOURCE_KIND_FIELDS = [
+  'kind', 'title', 'description', 'facts', 'schema', 'fields', 'health',
+  'scope', 'channel', 'threadContext', 'find', 'repliesTo', 'policy', 'refreshLabels', 'environment',
+] as const
+/** 桥这份副本认识的 SourceContext 成员。 */
+export const BRIDGE_SOURCE_CONTEXT_FIELDS = [
+  'deployment', 'commands', 'ready', 'configured', 'config', 'receive', 'atomic',
+  'state', 'threads', 'tickets', 'triggers', 'notify', 'report',
+] as const
+/** 桥这份副本认识的 Trigger 字段。 */
+export const BRIDGE_TRIGGER_FIELDS = [
+  'id', 'source', 'threads', 'actor', 'human', 'addressed', 'at', 'text', 'channel', 'url', 'meta',
+] as const
+/** 桥这份副本认识的 Ticket 字段（只抄了桥读得到的那些）。 */
+export const BRIDGE_TICKET_FIELDS = [
+  'id', 'title', 'ended', 'assignments', 'execution', 'origin', 'mandate', 'createdAt', 'updatedAt',
+] as const
+/** 桥这份副本认识的外发通道字段。 */
+export const BRIDGE_CHANNEL_FIELDS = ['allowed', 'send', 'link'] as const
+/** 桥这份副本认识的策略段字段。 */
+export const BRIDGE_POLICY_FIELDS = ['schema', 'fields', 'explicit', 'unnamed', 'rows'] as const
+/** 桥这份副本认识的线程上下文字段。 */
+export const BRIDGE_THREAD_CONTEXT_FIELDS = ['messageId', 'read'] as const
+/** 健康状态。 */
+export const BRIDGE_HEALTH_STATES = ['starting', 'ready', 'paused', 'error'] as const
+/** 桥用的健康码（引擎还有飞书专用的两个，桥用不到）。 */
+export const BRIDGE_HEALTH_CODES = ['setupPending', 'sourceOff', 'pollFailures'] as const
+/** 健康条目的字段。 */
+export const BRIDGE_HEALTH_FIELDS = ['state', 'detail', 'at', 'code', 'values'] as const
+
+/** 桥在运行时真正用到的 SourceContext 成员：这些名字在引擎里一改，桥就读到 undefined，而编译期看不出来。 */
+export const BRIDGE_USED_CONTEXT_MEMBERS = [
+  'ready', 'configured', 'report', 'config', 'state', 'receive', 'threads', 'tickets', 'triggers',
+] as const
+/** 桥在运行时真正读到的 Ticket 字段。 */
+export const BRIDGE_USED_TICKET_FIELDS = ['id', 'ended', 'assignments', 'execution', 'origin'] as const
+/** 桥在运行时真正读到的 Trigger 字段。 */
+export const BRIDGE_USED_TRIGGER_FIELDS = ['id', 'threads', 'meta', 'channel'] as const
+
+/** 两个类型是否相同（下面的断言用）。 */
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false
+/** 断言不成立时编译失败：字段名清单与接口对不上，就是副本自己漂了。 */
+type Assert<T extends true> = T
+type _kind = Assert<Equals<keyof SourceKind, typeof BRIDGE_SOURCE_KIND_FIELDS[number]>>
+type _context = Assert<Equals<keyof SourceContext, typeof BRIDGE_SOURCE_CONTEXT_FIELDS[number]>>
+type _trigger = Assert<Equals<keyof Trigger, typeof BRIDGE_TRIGGER_FIELDS[number]>>
+type _ticket = Assert<Equals<keyof Ticket, typeof BRIDGE_TICKET_FIELDS[number]>>
+type _channel = Assert<Equals<keyof SourceChannel<Record<string, unknown>>, typeof BRIDGE_CHANNEL_FIELDS[number]>>
+type _policy = Assert<Equals<keyof SourcePolicyPart<Record<string, unknown>>, typeof BRIDGE_POLICY_FIELDS[number]>>
+type _threadContext = Assert<Equals<keyof ThreadContext<Record<string, unknown>>, typeof BRIDGE_THREAD_CONTEXT_FIELDS[number]>>
+type _health = Assert<Equals<keyof Health, typeof BRIDGE_HEALTH_FIELDS[number]>>
+type _healthStates = Assert<Equals<Health['state'], typeof BRIDGE_HEALTH_STATES[number]>>

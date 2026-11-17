@@ -65,6 +65,36 @@ export const PlanSchema = z.object({
 
 export type Plan = z.infer<typeof PlanSchema>
 
+/**
+ * 树阶段的中间形状：任务还没有 design（第二段再补）。
+ *
+ * 为什么单独一种形状：最终计划里每个 task 都必须带导图（PlanTaskSchema.design 必填），
+ * 但树先落地、导图后补，中间态必须允许 design 缺省——否则第一段的产出根本过不了类型。
+ */
+export const TreeTaskSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  acceptance: z.array(z.string().min(1)).min(1),
+  scope: z.array(z.string().min(1)),
+  deps: z.array(z.string().min(1)),
+  priority: z.number().int().min(1).max(5).optional(),
+  design: TaskDesignSchema.optional(),
+}).strict()
+
+export const TreeModuleSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  tasks: z.array(TreeTaskSchema).min(1),
+}).strict()
+
+export const TreeSchema = z.object({
+  plan: z.object({ name: z.string().min(1), goal: z.string().min(1) }).strict(),
+  modules: z.array(TreeModuleSchema).min(1),
+}).strict()
+
+export type TreePlan = z.infer<typeof TreeSchema>
+export type TreeTask = z.infer<typeof TreeTaskSchema>
+
 /** 草稿 key：模型侧用的临时编号（模块 m1/m2、任务 t1/t2…），全局唯一。 */
 export const KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/
 export const KeySchema = z.string().regex(KEY_PATTERN)
@@ -96,7 +126,8 @@ export const RawTaskSchema = z.preprocess(normalizeKey, z.object({
   scope: z.array(z.string().min(1)),
   deps: z.array(z.string().min(1)),
   priority: z.number().int().min(1).max(5).optional(),
-  design: TaskDesignSchema,
+  // 可省略：树与子导图分两次生成（一次输出整棵大树会把模型的流打断）。
+  design: TaskDesignSchema.optional(),
 }).strict())
 
 /** 模型侧 module（草稿 key 版）：里面只有 tasks，没有第四层。 */

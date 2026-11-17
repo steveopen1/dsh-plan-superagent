@@ -213,10 +213,21 @@ export type Key<V> = string & {
 export type Family<V, A extends unknown[]> = ((...name: A) => Key<V>) & {
     readonly prefix: string;
 };
+/**
+ * 桥真正读到的契约面（其余字段只是类型上的传递依赖）。
+ *
+ * 引擎升版时最该盯的就是这几处字段名：触发器的 id/text/meta/threads/actor、
+ * 工单的 ended/assignments/origin/mandate、健康条目的 state/detail/code。
+ * 计划 t-2 的契约守卫测试就照这张清单写。
+ *
+ * 与文件末尾那组常量的分工：`BRIDGE_*_FIELDS` 是**穷举**字段面（配 `Assert<Equals<keyof X, ...>>`
+ * 编译期断言，引擎给类型加字段就会红）；`BRIDGE_USED_*` 是**运行时真正读到**的那几个成员。
+ * 本清单是桥与引擎之间**流转**的字段面：既包含桥读回来的，也包含桥写过去的
+ * （触发器的 actor/text/human/at 是桥填进去的）。
+ */
+export declare const BRIDGE_READS: readonly ["Trigger.id", "Trigger.text", "Trigger.meta", "Trigger.threads", "Trigger.actor", "Trigger.human", "Trigger.at", "Ticket.id", "Ticket.title", "Ticket.ended", "Ticket.assignments", "Ticket.origin", "Ticket.mandate", "Ticket.execution", "Health.state", "Health.detail", "Health.code"];
 /** 定义一个带类型的 KV 键（外部来源插件用这个自己声明键）。 */
 export declare const record: <V>(key: string) => Key<V>;
-/** 定义一个键族，键名以 `prefix` 开头。 */
-export declare function family<V, A extends unknown[] = [string]>(prefix: string, format?: (...name: A) => string): Family<V, A>;
 /** 稳定内容派生 id：同样的输入永远得到同样的 id（引擎 `core/ids.ts` 的 `key()`）。 */
 export declare function stableKey(...values: string[]): string;
 /** 引擎固定的英文健康文案（`{name}` 占位）；面板按界面语言翻译 `code`。 */
@@ -265,14 +276,6 @@ export declare function num(opts?: {
     max?: number;
     default?: number | (() => number);
 }): SchemaLike<number>;
-/** 布尔字段。 */
-export declare function bool(opts?: {
-    default?: boolean | (() => boolean);
-}): SchemaLike<boolean>;
-/** 枚举字段。 */
-export declare function enumOf<T extends string>(values: readonly T[], opts?: {
-    default?: T | (() => T);
-}): SchemaLike<T>;
 /** 可选字段：缺省即 undefined，不报错。 */
 export declare function opt<T>(schema: SchemaLike<T>): SchemaLike<T | undefined>;
 /** 数组字段。 */
@@ -418,4 +421,30 @@ export interface SourceHost {
         health: readonly string[];
     }): SourceContext;
 }
+/** 桥这份副本认识的 Source kind 字段。 */
+export declare const BRIDGE_SOURCE_KIND_FIELDS: readonly ["kind", "title", "description", "facts", "schema", "fields", "health", "scope", "channel", "threadContext", "find", "repliesTo", "policy", "refreshLabels", "environment"];
+/** 桥这份副本认识的 SourceContext 成员。 */
+export declare const BRIDGE_SOURCE_CONTEXT_FIELDS: readonly ["deployment", "commands", "ready", "configured", "config", "receive", "atomic", "state", "threads", "tickets", "triggers", "notify", "report"];
+/** 桥这份副本认识的 Trigger 字段。 */
+export declare const BRIDGE_TRIGGER_FIELDS: readonly ["id", "source", "threads", "actor", "human", "addressed", "at", "text", "channel", "url", "meta"];
+/** 桥这份副本认识的 Ticket 字段（只抄了桥读得到的那些）。 */
+export declare const BRIDGE_TICKET_FIELDS: readonly ["id", "title", "ended", "assignments", "execution", "origin", "mandate", "createdAt", "updatedAt"];
+/** 桥这份副本认识的外发通道字段。 */
+export declare const BRIDGE_CHANNEL_FIELDS: readonly ["allowed", "send", "link"];
+/** 桥这份副本认识的策略段字段。 */
+export declare const BRIDGE_POLICY_FIELDS: readonly ["schema", "fields", "explicit", "unnamed", "rows"];
+/** 桥这份副本认识的线程上下文字段。 */
+export declare const BRIDGE_THREAD_CONTEXT_FIELDS: readonly ["messageId", "read"];
+/** 健康状态。 */
+export declare const BRIDGE_HEALTH_STATES: readonly ["starting", "ready", "paused", "error"];
+/** 桥用的健康码（引擎还有飞书专用的两个，桥用不到）。 */
+export declare const BRIDGE_HEALTH_CODES: readonly ["setupPending", "sourceOff", "pollFailures"];
+/** 健康条目的字段。 */
+export declare const BRIDGE_HEALTH_FIELDS: readonly ["state", "detail", "at", "code", "values"];
+/** 桥在运行时真正用到的 SourceContext 成员：这些名字在引擎里一改，桥就读到 undefined，而编译期看不出来。 */
+export declare const BRIDGE_USED_CONTEXT_MEMBERS: readonly ["ready", "configured", "report", "config", "state", "receive", "threads", "tickets", "triggers"];
+/** 桥在运行时真正读到的 Ticket 字段。 */
+export declare const BRIDGE_USED_TICKET_FIELDS: readonly ["id", "ended", "assignments", "execution", "origin"];
+/** 桥在运行时真正读到的 Trigger 字段。 */
+export declare const BRIDGE_USED_TRIGGER_FIELDS: readonly ["id", "threads", "meta", "channel"];
 export {};

@@ -27,7 +27,7 @@ export interface BoardNode {
 
 export type EditOp =
   | { op: 'init_board'; name: string; goal: string }
-  | { op: 'add_node'; node: { id: string; type: NodeType; title: string; parent?: string | null; deps?: string[]; priority?: number; acceptance?: string[]; scope?: string[] } }
+  | { op: 'add_node'; node: { id: string; type: NodeType; title: string; parent?: string | null; deps?: string[]; priority?: number; acceptance?: string[]; scope?: string[]; note?: string } }
   | { op: 'update_node'; id: string; fields: { title?: string; note?: string; acceptance?: string[]; scope?: string[]; priority?: number; parent?: string | null; deps?: string[]; pos?: { x: number; y: number } | null } }
   | { op: 'remove_node'; id: string }
   | { op: 'set_deps'; id: string; deps: string[] }
@@ -299,6 +299,8 @@ export function applyOps(b: Board, ops: EditOp[], now: string): string[] {
         id: op.node.id, type: op.node.type, parent, title: op.node.title,
         status: 'planned', deps: op.node.deps ?? [], priority: op.node.priority ?? 3,
         acceptance: op.node.acceptance ?? [], scope: op.node.scope ?? [], evidence: [],
+        // note 也要落盘：子导图指针（design-graph: …）就靠它，手写提案不该把它丢掉。
+        note: op.node.note ?? '',
         createdAt: now, updatedAt: now, startedAt: null, by: 'plan_edit',
       })
       changed.push('add ' + op.node.id)

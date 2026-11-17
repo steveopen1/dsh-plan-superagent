@@ -65,4 +65,4 @@ export declare function mountRoutes(webServer: {
         path: string;
         handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
     }): () => void;
-}, registry: BoardRegistry, plan?: PlanHook, mode?: ModeDeps): () => void;
+}, registry: BoardRegistry, plan?: PlanHook, mode?: ModeDeps, designDir?: string): () => void;

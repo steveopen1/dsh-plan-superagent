@@ -40,5 +40,6 @@ export declare function apply(ctx: HostCtx, config?: Partial<Config>, deps?: {
     plan?: import('./routes.js').PlanHook;
     mode?: import('./routes.js').ModeDeps;
     isPlanMode?: (agentId: string | undefined) => boolean;
+    designDir?: string;
 }): () => void;
 export {};
