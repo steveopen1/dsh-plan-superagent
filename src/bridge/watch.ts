@@ -25,6 +25,10 @@ export interface DispatchRecord {
   ticketId?: string
   /** 收单（回写）时刻；用来判断人是不是在收单之后又动过这个任务。 */
   settledAt?: string
+  /** 触发器所在 thread 的完整 key；用来在工单已经结束时找回工单 id。 */
+  threadKey?: string
+  /** 本次尝试结束的时刻（工单终结时记下）；��它判断人是否已重新启用该任务。 */
+  endedAt?: string
 }
 
 /** 桥私有的 KV 键（引擎的 KV 归它自己，外部来源插件自己声明键）。 */
@@ -83,6 +87,31 @@ export async function watchPlanboard(ctx: SourceContext, signal: AbortSignal, op
 }
 
 /** 把一轮的统计压成一行（健康条目展示用）。 */
+/** How long a dispatch may wait for its ticket before the attempt is treated as lost. */
+const STALE_ATTEMPT_MS = 10 * 60 * 1000
+
+/**
+ * Mark attempts whose ticket never showed up as finished.
+ *
+ * The ticket is created asynchronously after the Trigger is evaluated; when the evaluation filtered
+ * the Trigger (policy) or the router never accepted it, no ticket ever appears and the task would stay
+ * `doing` forever. After the grace period the attempt is closed, so a human can re-arm the task.
+ */
+export function expireStaleAttempts(board: Board, dispatched: Record<string, DispatchRecord>, now = Date.now()): number {
+  let expired = 0
+  for (const [taskId, entry] of Object.entries(dispatched)) {
+    if (entry.ticketId != null || entry.endedAt != null) continue
+    const task = board.nodes.find(node => node.id === taskId)
+    if (task == null) continue
+    const started = task.startedAt != null ? Date.parse(task.startedAt) : NaN
+    if (!Number.isFinite(started)) continue
+    if (now - started < STALE_ATTEMPT_MS) continue
+    entry.endedAt = new Date(now).toISOString()
+    expired += 1
+  }
+  return expired
+}
+
 function describePoll(result: PollResult): string {
   const parts = [`${result.ready} ready`, `${result.dispatched} dispatched`]
   if (result.settled > 0) parts.push(`${result.settled} settled`)
@@ -120,6 +149,9 @@ export async function pollPlanboard(ctx: SourceContext, config: PlanboardConfig,
 
   // ② 收单：工单终态 → 把证据写回板上。
   const settledCount = settleFinished(ctx, config, dispatched, settled)
+  // A dispatch whose ticket never showed up (the Trigger was filtered, the router never accepted it)
+  // would keep the task `doing` forever: after a grace period the attempt is closed, so a human can re-arm it.
+  expireStaleAttempts(board, dispatched)
 
   // ③ 派单：就绪且本轮不重复派的任务。
   const candidates = readyTasks(board).filter(task => shouldDispatch(task, dispatched))
@@ -141,7 +173,7 @@ export async function pollPlanboard(ctx: SourceContext, config: PlanboardConfig,
     if (result === 'filtered') filtered += 1
     else dispatchedCount += 1
     // 记住这次尝试：同一 task 不会再建第二张单（除非人把它重新放回就绪态）。
-    dispatched[task.id] = { attempt, triggerId: trigger.id }
+    dispatched[task.id] = { attempt, triggerId: trigger.id, threadKey: trigger.channel?.thread }
     describeThread(ctx, trigger, task)
     // 板面状态：派出去就算「进行中」（与 plan_next 的 task_issued 同义）。
     markDoing(config.project, task.id, trigger.id)
@@ -162,16 +194,16 @@ export async function pollPlanboard(ctx: SourceContext, config: PlanboardConfig,
 function attemptFor(task: BoardNode, dispatched: Record<string, DispatchRecord>): number {
   const entry = dispatched[task.id]
   if (entry == null) return 0
-  return entry.settledAt == null ? entry.attempt : entry.attempt + 1
+  return entry.endedAt == null ? entry.attempt : entry.attempt + 1
 }
 
 /** 任务是否该在本轮派单。 */
 function shouldDispatch(task: BoardNode, dispatched: Record<string, DispatchRecord>): boolean {
   const entry = dispatched[task.id]
   if (entry == null) return true
-  if (entry.settledAt == null) return false // 已经派出去了，还没收单
-  // 收单之后人又动过这个任务（updatedAt 变了）→ 允许重开一轮尝试。
-  return task.updatedAt > entry.settledAt
+  if (entry.endedAt == null) return false // 还在飞
+  // 上一轮尝试已经结束（无论成功、失败还是被停）：只有人重新启用这个任务（updatedAt 变了）才重开一轮。
+  return task.updatedAt > entry.endedAt
 }
 
 /** 造触发器：简报 + 子导图指针。 */
@@ -212,7 +244,7 @@ function describeThread(ctx: SourceContext, trigger: { threads: { source: string
 /** 在未结束的工单里找我们派出去的那些，记下工单 id。 */
 function refreshTicketIds(ctx: SourceContext, dispatched: Record<string, DispatchRecord>): void {
   let open: Ticket[]
-  try { open = ctx.tickets.open() } catch { return }
+  try { open = ctx.tickets.open() } catch { open = [] }
   for (const ticket of open) {
     const trigger = ctx.triggers.get(ticket.origin.triggerId)
     const taskId = trigger?.meta?.taskId
@@ -220,6 +252,21 @@ function refreshTicketIds(ctx: SourceContext, dispatched: Record<string, Dispatc
     const entry = dispatched[taskId]
     if (entry == null || entry.triggerId !== ticket.origin.triggerId) continue
     if (entry.ticketId !== ticket.id) entry.ticketId = ticket.id
+  }
+  // A ticket that already ended (failed fast, stopped, merged) is no longer in tickets.open(),
+  // so look it up through the thread's subscriptions — otherwise its result would never be
+  // written back and the task would stay `doing` forever.
+  for (const entry of Object.values(dispatched)) {
+    if (entry.ticketId != null || entry.threadKey == null) continue
+    let thread: { subscriptions?: string[] } | undefined
+    try { thread = ctx.threads.get(entry.threadKey) } catch { thread = undefined }
+    for (const id of thread?.subscriptions ?? []) {
+      let ticket: Ticket | undefined
+      try { ticket = ctx.tickets.get(id) } catch { ticket = undefined }
+      if (ticket?.origin?.triggerId !== entry.triggerId) continue
+      entry.ticketId = id
+      break
+    }
   }
 }
 
@@ -237,6 +284,9 @@ function settleFinished(ctx: SourceContext, config: PlanboardConfig, dispatched:
     if (ticket == null || ticket.ended == null) continue
     const evidence = evidenceOf(ticket)
     const now = new Date().toISOString()
+    // 这一轮尝试已经结束（工单终结）：记下时刻，人重新启用任务即可重开一轮。
+    if (entry.endedAt == null) entry.endedAt = ticket.ended?.at ?? now
+    if (settled.has(entry.ticketId)) continue
     try {
       writeBack(config.project, taskId, ticket, evidence, now)
     } catch (error) {

@@ -1,3 +1,4 @@
+import { type Board } from '../board/schema.js';
 import { type SourceContext, type Ticket } from './contract.js';
 import { type PlanboardConfig } from './source.js';
 /** 一个任务的一次派单尝试。 */
@@ -10,6 +11,10 @@ export interface DispatchRecord {
     ticketId?: string;
     /** 收单（回写）时刻；用来判断人是不是在收单之后又动过这个任务。 */
     settledAt?: string;
+    /** 触发器所在 thread 的完整 key；用来在工单已经结束时找回工单 id。 */
+    threadKey?: string;
+    /** 本次尝试结束的时刻（工单终结时记下）；��它判断人是否已重新启用该任务。 */
+    endedAt?: string;
 }
 /** 桥私有的 KV 键（引擎的 KV 归它自己，外部来源插件自己声明键）。 */
 export declare const KV_DISPATCHED: import("./contract.js").Key<Record<string, DispatchRecord>>;
@@ -26,6 +31,14 @@ export declare const BRIDGE_ACTOR = "superagent:bridge";
  * 连续三次失败才报 error（一次网络/文件抖动不该叫醒人）。
  */
 export declare function watchPlanboard(ctx: SourceContext, signal: AbortSignal, options?: WatchOptions): Promise<void>;
+/**
+ * Mark attempts whose ticket never showed up as finished.
+ *
+ * The ticket is created asynchronously after the Trigger is evaluated; when the evaluation filtered
+ * the Trigger (policy) or the router never accepted it, no ticket ever appears and the task would stay
+ * `doing` forever. After the grace period the attempt is closed, so a human can re-arm the task.
+ */
+export declare function expireStaleAttempts(board: Board, dispatched: Record<string, DispatchRecord>, now?: number): number;
 /** 一轮轮询的统计。 */
 export interface PollResult {
     /** 板上的就绪任务数。 */
