@@ -420,23 +420,19 @@ const STATUS_COLOR: Record<string, string> = {
 }
 
 /**
- * 宿主右侧栏里的 tab 类型：id 用来占插槽 key，kind 用来 openTab。
- * 面板改住这里，而不是 shell.overlay —— 后者是 position:absolute;inset:0 的整屏浮层，
- * 会直接盖住对话区（用户不接受 UI 挡住操作面）。
+ * 宿主主区面板 id。
+ *
+ * main 是 keyed 槽（key = 面板 id），sidebar.panellist 是 list 槽（id = 同一个面板 id）：
+ * 宿主靠这个 id 把侧栏图标和主区面板对上（layout.selectPanel 找不到同名的 main 面板会抛
+ * "main panel X is not registered"），所以两处必须同一个字符串。
+ * 它与引擎的 'dsh-superagent'、旧插件的 'dsh-plan-board' 都不撞，全宿主唯一。
  */
-const PANEL_TAB_ID = NS + ':panel'
-const PANEL_TAB_KIND = 'planboard'
+const PANEL_ID = NS
 
-/**
- * 宿主右侧栏服务（运行时注入；服务不在时面板就不出现，绝不拖垮插件）。
- */
-let sidebarRight: { openTab?: (kind: string) => void } | null = null
-
-/** 打开面板 = 让宿主右侧栏开一个 PlanBoard tab。 */
-function openPanelTab(): void {
-  const svc = sidebarRight
-  if (svc == null || typeof svc.openTab !== 'function') return
-  svc.openTab(PANEL_TAB_KIND)
+/** 侧栏图标的显示名（locale 字典；zh/en 同名，PlanBoard 是产品名不翻译）。 */
+const LOCALE_DICT = {
+  zh: { panel: 'PlanBoard' },
+  en: { panel: 'PlanBoard' },
 }
 
 /** 主题跟随：采样 app body 实际背景亮度；异常时退回系统偏好。 */
@@ -453,8 +449,7 @@ function appDark(): boolean {
 }
 
 const CSS = [
-  // 面板住进宿主右侧栏的一个 tab：跟着容器走，自己不定位（shell.overlay 是 position:absolute 的浮层，
-  // 会盖住对话区 —— 用户不接受 UI 挡住操作面）
+  // 面板住在宿主**主区**（main 槽 keyed）：宿主自己排版，不盖对话区（用户不接受 UI 挡住操作面）
   '.pb-panel{--pb-bg:#f8fafc;--pb-ink:#0f172a;--pb-line:#e2e8f0;--pb-card:#ffffff;--pb-muted:#64748b;',
   'position:relative;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;',
   'background:var(--pb-bg);color:var(--pb-ink);border-left:1px solid var(--pb-line)}',
@@ -505,9 +500,6 @@ const CSS = [
   // 深色极光玻璃（两种主题同款，对齐概念稿 A）：内层近黑玻璃(padding-box) + 外层青→紫→洋红渐变描边(border-box)
   // 收起/展开：本按钮在 headerUtilities 里是流内 flex item（右邻「⋯ 更多操作」保持 8px 槽位间距），
   // 因此宽度变化只会向左生长——右缘天然固定，邻居变化时实时重排。
-  '.pb-entry{--pb-ease:cubic-bezier(.22,1,.36,1);--pb-dur:.42s;--pb-stat:#a855f7;',
-  // 收起时 5.5px 内边距 + 1px 边框 = 31×31 整；圆角与展开态同值 15.5px（= 高度/2）：
-  // 31×31 上即正圆，展开成胶囊时弧度完全连续，不会出现「方角 → 胶囊」的弧度跳变（用户 2026-09-16 要求统一）。
   'position:relative;display:inline-flex;align-items:center;gap:0;box-sizing:border-box;height:31px;padding:0 5.5px;',
   'border-radius:15.5px;cursor:pointer;overflow:hidden;user-select:none;vertical-align:middle;line-height:1;',
   'font-size:12.5px;font-weight:600;letter-spacing:.2px;color:#f3f7ff;border:1px solid transparent;',
@@ -515,66 +507,24 @@ const CSS = [
   'box-shadow:0 0 0 1px rgba(139,92,246,.20),0 2px 12px rgba(56,189,248,.30),0 2px 18px rgba(232,121,249,.24),inset 0 0 14px rgba(124,58,237,.35),inset 0 1px 0 rgba(255,255,255,.07);',
   'transition:transform .16s cubic-bezier(.34,1.56,.64,1),box-shadow .28s,filter .28s,padding var(--pb-dur) var(--pb-ease),border-radius var(--pb-dur) var(--pb-ease)}',
   // 状态色（收起态只剩图标时靠它继续传达站位语义：图标光晕 + 悬停时的状态点）
-  '.pb-entry[data-stat="clean"]{--pb-stat:#22d3ee}',
-  '.pb-entry[data-stat="work"]{--pb-stat:#f59e0b}',
-  '.pb-entry[data-stat="block"]{--pb-stat:#ef4444}',
-  '.pb-entry[data-stat="none"]{--pb-stat:#94a3b8}',
-  '.pb-entry .pb-halo-stop{stop-color:var(--pb-stat)}',
-  // 浅色主题不反白：保持深色玻璃，仅加强外发光，让它在白底上"跳"出来
-  '.pb-entry[data-mode="light"]{box-shadow:0 0 0 1px rgba(139,92,246,.22),0 2px 14px rgba(56,189,248,.40),0 2px 22px rgba(232,121,249,.30),inset 0 0 14px rgba(124,58,237,.35),inset 0 1px 0 rgba(255,255,255,.08)}',
-  // 极光内层：三点径向叠加（悬停/开启时增亮呼吸）
-  '.pb-entry .pb-aurora{position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:.85;transition:opacity .3s;',
   'background:radial-gradient(58% 120% at 12% 18%,rgba(34,211,238,.36),transparent 62%),radial-gradient(52% 128% at 88% 30%,rgba(232,121,249,.32),transparent 64%),radial-gradient(72% 140% at 50% 128%,rgba(139,92,246,.32),transparent 66%)}',
   // 流光描边环：conic 渐变 + mask 挖空成 1px 环，悬停/开启时旋转
-  '.pb-entry .pb-ring{position:absolute;inset:0;border-radius:inherit;padding:1px;opacity:0;transition:opacity .25s;pointer-events:none;',
   'background:conic-gradient(from 0deg,transparent 0 40%,rgba(34,211,238,.95) 58%,rgba(139,92,246,1) 72%,rgba(232,121,249,.95) 86%,transparent 100%);',
   '-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;',
   'mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}',
-  '.pb-entry.pb-on .pb-ring,.pb-entry:hover .pb-ring{opacity:1;animation:pb-ring-spin 2.6s linear infinite}',
   '@keyframes pb-ring-spin{to{transform:rotate(360deg)}}',
-  '.pb-entry .pb-shine{position:absolute;top:-20%;left:-65%;width:38%;height:140%;pointer-events:none;opacity:0;',
   'background:linear-gradient(100deg,transparent,rgba(255,255,255,.55),transparent);transform:skewX(-18deg)}',
-  '.pb-entry:hover .pb-shine{animation:pb-shine .9s ease}',
   '@keyframes pb-shine{0%{left:-65%;opacity:.9}100%{left:135%;opacity:0}}',
   // 能量核心图标（C）：轨道虚线流动 + 双卫星脉冲 + 核心呼吸
-  '.pb-entry .pb-orb{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex:none;',
   'transition:transform .2s cubic-bezier(.34,1.56,.64,1)}',
-  '.pb-entry .pb-orb svg{width:18px;height:18px;display:block;overflow:visible}',
-  '.pb-entry .pb-core{transform-box:fill-box;transform-origin:center;animation:pb-core 2.8s ease-in-out infinite}',
   '@keyframes pb-core{0%,100%{transform:scale(1);opacity:.92}50%{transform:scale(1.18);opacity:1}}',
   '@keyframes pb-dash{to{stroke-dashoffset:-14}}',
-  '.pb-entry .pb-sat{transform-box:fill-box;transform-origin:center;animation:pb-sat 2.8s ease-in-out infinite}',
-  '.pb-entry .pb-sat.s2{animation-delay:.45s}',
   '@keyframes pb-sat{0%,100%{transform:scale(.72);opacity:.5}50%{transform:scale(1.15);opacity:1}}',
-  '.pb-entry:hover .pb-orb{transform:rotate(-6deg)}',
-  '.pb-entry:hover .pb-core{animation-duration:1.1s}',
-  '.pb-entry:hover .pb-orbit{stroke-dasharray:4 3;animation:pb-dash .8s linear infinite}',
-  // 状态点：灰=未设置/无板 · 青=干净 · 琥珀=有 doing · 红=漂移阻断
-  // 状态点贴在按钮角上（绝对定位在按钮内部）：hover 时只改透明度，宽度永远不变 —— 不挤右邻
-  '.pb-entry .pb-dot{position:absolute;right:3px;bottom:3px;width:6px;height:6px;border-radius:50%;background:#94a3b8;',
   'opacity:0;transition:opacity .25s,background .25s,box-shadow .25s}',
-  '.pb-entry:hover .pb-dot,.pb-entry:focus-visible .pb-dot,.pb-entry.pb-on .pb-dot{opacity:1}',
-  '.pb-entry .pb-dot.pb-clean{background:#22d3ee;box-shadow:0 0 6px rgba(34,211,238,.65)}',
-  '.pb-entry .pb-dot.pb-work{background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,.75);animation:pb-dot 2s ease-in-out infinite}',
-  '.pb-entry .pb-dot.pb-block{background:#ef4444;box-shadow:0 0 9px rgba(239,68,68,.85);animation:pb-dot 1.1s ease-in-out infinite}',
   '@keyframes pb-dot{0%,100%{opacity:1}50%{opacity:.45}}',
-  '.pb-entry .pb-dot.pb-none{background:#94a3b8;opacity:.55}',
-  // 展开态（悬停 / 键盘聚焦 / 面板开启）：只改 padding（宽度随内容生长）+ 上浮/提亮 + 辉光。
-  // 圆角两态同为 15.5px（= 高度/2，渲染结果与邻居的 999px 一致）：收起=正圆、展开=胶囊，
-  // 弧度全程不动 —— 既没有「方角 → 胶囊」的跳变，也没有 999px 那种"超过半高即被 clamp、
-  // 补间尾帧才突变"的问题（用户 2026-09-16 要求两态弧度统一）。
-  // 悬停不再放大缩小（用户 2026-09-15 要求去掉）：避免与收起/展开的形变动效叠加。
-  // 只提亮/上浮，不改 padding —— 改宽度会把右邻（「⋯ 更多操作」）挤走
-  '.pb-entry:hover,.pb-entry:focus-visible,.pb-entry.pb-on{transform:translateY(-1.5px);filter:brightness(1.12);',
   'box-shadow:0 0 0 1px rgba(168,85,247,.45),0 6px 26px rgba(124,58,237,.55),0 0 26px rgba(56,189,248,.40),0 0 30px rgba(232,121,249,.32),inset 0 0 18px rgba(124,58,237,.45)}',
-  '.pb-entry:active{transform:translateY(0);transition-duration:.06s;',
   'box-shadow:0 1px 6px rgba(99,102,241,.4),inset 0 1px 0 rgba(255,255,255,.12)}',
-  '.pb-entry:focus-visible{outline:2px solid rgba(168,85,247,.75);outline-offset:2px}',
-  '.pb-entry.pb-on{box-shadow:0 0 0 1px rgba(168,85,247,.55),0 2px 16px rgba(124,58,237,.50),0 0 20px rgba(56,189,248,.28),inset 0 0 16px rgba(124,58,237,.45)}',
-  '.pb-entry.pb-on .pb-aurora{opacity:1;animation:pb-aurora 3.2s ease-in-out infinite}',
   '@keyframes pb-aurora{0%,100%{opacity:.8;filter:saturate(1)}50%{opacity:1;filter:saturate(1.35)}}',
-  '@media (prefers-reduced-motion:reduce){.pb-entry,.pb-entry *{animation:none!important;transition:none!important}}',
-  // ===== 一句话生成 / 项目切换 / 提案编辑 =====
   '.pb-projrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--pb-line);font-size:11px;color:var(--pb-muted)}',
   '.pb-projpath{font-family:ui-monospace,monospace;font-size:11px;color:var(--pb-ink);cursor:pointer;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.pb-tag{cursor:pointer;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -632,75 +582,6 @@ async function post(path: string, body: Record<string, unknown>): Promise<Record
   return await r.json() as Record<string, unknown>
 }
 
-/**
- * 入口按钮（A 极光玻璃 + C 能量核心）：高度 31px、胶囊圆角 999px，与同槽位「Android 面板」严格对齐。
- * 状态点数据来自 GET /state（15s 轮询 + 主题跟随），未设置项目路径时退化为灰点。
- */
-function PaneSidebarButton(): ReturnType<typeof h> {
-  ensureStyles()
-  const [mode, setMode] = useState(appDark() ? 'dark' : 'light')
-  const [stat, setStat] = useState<{ kind: 'none' | 'clean' | 'work' | 'block'; tip: string }>({ kind: 'none', tip: '未设置项目路径' })
-  const btnRef = useRef<HTMLButtonElement | null>(null)
-  useEffect(() => {
-    let stop = false
-    const tick = async (): Promise<void> => {
-      if (stop) return
-      setMode(appDark() ? 'dark' : 'light')
-      const project = loadProject()
-      if (!isAbsoluteProject(project)) { setStat({ kind: 'none', tip: '未设置项目路径（点开面板填写）' }); return }
-      try {
-        const r = await fetch(API + '/state?project=' + encodeURIComponent(project))
-        const j = await r.json() as { ok?: boolean; board?: { version?: number; nodes?: { status: string }[]; driftBlock?: unknown }; station?: string | null }
-        if (stop) return
-        if (j.ok !== true || j.board == null) { setStat({ kind: 'none', tip: '未找到 .plan-board/（先跑 plan_edit init_board）' }); return }
-        const nodes = j.board.nodes ?? []
-        const doing = nodes.filter(n => n.status === 'doing').length
-        const blocked = nodes.filter(n => n.status === 'blocked').length
-        const drift = j.board.driftBlock != null
-        const kind: 'clean' | 'work' | 'block' = drift || blocked > 0 ? 'block' : doing > 0 ? 'work' : 'clean'
-        const head = drift ? '漂移阻断中' : doing > 0 ? doing + ' 个进行中' : blocked > 0 ? blocked + ' 个阻塞' : '无进行中任务'
-        setStat({ kind, tip: 'v' + (j.board.version ?? '?') + ' · ' + head + (j.station != null ? ' · 站位 ' + j.station : '') })
-      } catch { if (!stop) setStat({ kind: 'none', tip: '读取板子失败' }) }
-    }
-    void tick()
-    const t = setInterval(() => { void tick() }, 15000)
-    return () => { stop = true; clearInterval(t) }
-  }, [])
-  const orb = h('span', { className: 'pb-orb', key: 'orb', 'aria-hidden': 'true' },
-    h('svg', { viewBox: '0 0 18 18' },
-      h('defs', { key: 'defs' },
-        h('linearGradient', { id: 'pb-orb-orbit', x1: '0', y1: '0', x2: '1', y2: '0' },
-          h('stop', { key: 'o1', offset: '0', stopColor: '#22d3ee' }),
-          h('stop', { key: 'o2', offset: '1', stopColor: '#e879f9' })),
-        h('radialGradient', { id: 'pb-orb-core', cx: '.42', cy: '.38', r: '.68' },
-          h('stop', { key: 'c1', offset: '0', stopColor: '#ffffff' }),
-          h('stop', { key: 'c2', offset: '.34', stopColor: '#ddd6fe' }),
-          h('stop', { key: 'c3', offset: '1', stopColor: '#7c3aed' })),
-        h('radialGradient', { id: 'pb-orb-halo', cx: '.5', cy: '.5', r: '.5' },
-          h('stop', { key: 'h1', className: 'pb-halo-stop', offset: '0', stopOpacity: '.55' }),
-          h('stop', { key: 'h2', offset: '1', stopColor: '#a855f7', stopOpacity: '0' }))),
-      h('circle', { key: 'halo', cx: 9, cy: 9, r: 6.5, fill: 'url(#pb-orb-halo)' }),
-      h('g', { key: 'ring', transform: 'rotate(-22 9 9)' },
-        h('ellipse', { key: 'flow', className: 'pb-orbit', cx: 9, cy: 9, rx: 7.4, ry: 2.9, fill: 'none', stroke: 'url(#pb-orb-orbit)', strokeWidth: 1 }),
-        h('circle', { key: 'sat1', className: 'pb-sat', cx: 1.6, cy: 9, r: 1.25, fill: '#22d3ee' }),
-        h('circle', { key: 'sat2', className: 'pb-sat s2', cx: 16.4, cy: 9, r: 1.25, fill: '#e879f9' })),
-      h('circle', { key: 'core', className: 'pb-core', cx: 9, cy: 9, r: 2.6, fill: 'url(#pb-orb-core)' })))
-  const dotCls = 'pb-dot ' + (stat.kind === 'clean' ? 'pb-clean' : stat.kind === 'work' ? 'pb-work' : stat.kind === 'block' ? 'pb-block' : 'pb-none')
-  return h('button', {
-    className: 'pb-entry',
-    'data-mode': mode,
-    'data-stat': stat.kind,
-    ref: btnRef,
-    onClick: openPanelTab,
-    title: 'dsh-plan-superagent 规划面板（右侧栏）· ' + stat.tip,
-    'aria-label': 'dsh-plan-superagent 规划面板，' + stat.tip,
-  },
-    h('span', { className: 'pb-aurora', key: 'aurora', 'aria-hidden': 'true' }),
-    h('span', { className: 'pb-ring', key: 'ring', 'aria-hidden': 'true' }),
-    orb,
-    h('span', { className: dotCls, key: 'dot' }),
-    h('span', { className: 'pb-shine', key: 'shine', 'aria-hidden': 'true' }))
-}
 
 /** 客户端环检测（保存前快失败；服务端 lint 仍兜底）。 */
 function hasCycle(nodes: { id: string; deps: string[] }[]): boolean {
@@ -1069,6 +950,28 @@ function PlanBoardModeChip(props: { sessionId?: string }): ReturnType<typeof h> 
     }, h('svg', { viewBox: '0 0 16 16', width: 13, height: 13, 'aria-hidden': 'true' },
       h('rect', { x: 2.2, y: 2.6, width: 11.6, height: 10.8, rx: 2.4, fill: 'none', stroke: 'currentColor', strokeWidth: 1.4 }),
       h('path', { d: 'M4.8 6.3h6.4M4.8 9.2h4.2', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round' }))))
+}
+/**
+ * 侧栏面板图标：宿主按面板大小传 size（16/18），颜色跟主题走 currentColor。
+ * 不加文字、不加外框 —— 侧栏那一列都是小图标，板只是其中一个。
+ */
+function PanelBoardIcon(props: { size?: number; active?: boolean }): ReturnType<typeof h> {
+  const size = props.size ?? 18
+  return h('svg', {
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': 'true',
+  },
+    h('rect', { x: 3.5, y: 4, width: 17, height: 16, rx: 2.5 }),
+    h('path', { d: 'M3.5 9.2h17' }),
+    h('path', { d: 'M9.2 9.2V20' }),
+    h('path', { d: 'M12.8 13.2h4.4M12.8 16.6h4.4' }))
 }
 function PaneWindow(): ReturnType<typeof h> | null {
   const [collapsed, setCollapsed] = useState(false)
@@ -1568,11 +1471,10 @@ function PaneWindow(): ReturnType<typeof h> | null {
   )
 }
 
-interface SidebarRightLike {
-  openTab?: (kind: string) => void
-}
-interface SidebarRightTabsLike {
-  register(def: { id: string; kind: string; priority?: string; title: () => string }): unknown
+/** 宿主 locale 服务：注册字典 + 绑一个 t(key)。 */
+interface LocaleLike {
+  register(ns: string, dicts: Record<string, Record<string, string>>): unknown
+  bind(ns: string): (key: string) => string
 }
 type SlotsCtx = {
   slots: {
@@ -1580,36 +1482,34 @@ type SlotsCtx = {
     register(meta: Record<string, unknown>, component?: unknown): unknown
   }
   effect(fn: () => unknown, label?: string): void
-  /** 运行时注入宿主服务：服务没到位就不回调，插件照常加载。 */
-  inject(services: string[], fn: (scope: {
-    slots: SlotsCtx['slots']
-    effect(fn: () => unknown, label?: string): void
-    sidebarRight?: SidebarRightLike
-    sidebarRightTabs?: SidebarRightTabsLike
-  }) => void): void
+  locale: LocaleLike
 }
 
-export const inject = ['slots']
+/** 客户端模块要的服务：slots（插槽）+ locale（侧栏图标的字典）。 */
+export const inject = ['slots', 'locale']
 
 export function apply(ctx: SlotsCtx): void {
-  // 面板住进宿主右侧栏的一个 tab：宿主自己排版，不盖对话区。
-  // 运行时注入这两个服务 —— 宿主没有右侧栏时这一段不执行，插件照常加载。
-  ctx.inject(['slots', 'sidebarRight', 'sidebarRightTabs'], (scope) => {
-    scope.effect(() => scope.sidebarRightTabs?.register({
-      id: PANEL_TAB_ID,
-      kind: PANEL_TAB_KIND,
-      priority: 'builtin',
-      title: () => 'PlanBoard',
-    }), NS + ':tabtype')
-    scope.effect(() => scope.slots.inject('sidebar.right.pane.tab', () => scope.slots.register({
-      name: 'sidebar.right.pane.tab',
-      key: PANEL_TAB_ID,
-    }, PaneWindow as unknown as (props: never) => unknown)), NS + ':tab')
-    sidebarRight = scope.sidebarRight ?? null
-  })
+  // 侧栏图标的显示名走 locale（跟引擎一个姿势：注册字典 -> bind -> label: () => t('panel')）
+  ctx.effect(() => ctx.locale.register(NS, LOCALE_DICT), NS + ': dictionaries')
+  const t = ctx.locale.bind(NS)
   ctx.effect(() => {
-    // 计划板模式开关：挂原生输入栏左侧（与权限/计划芯片同一排）。
-    // list 型插槽按 id 去重，id 必须全宿主唯一 —— 用 NS 前缀，且不能与旧插件同名。
+    // 主区面板（main 是 keyed 槽）：点侧栏图标就在主区打开板 —— 宿主自己排版，不盖聊天区。
+    ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main',
+      key: PANEL_ID,
+      locale: NS,
+      inject: () => ({}),
+    }, PaneWindow as unknown as (props: never) => unknown))
+    // 侧栏图标（sidebar.panellist 是 list 槽）：id 必须全宿主唯一，重复会抛
+    // "already has an entry with id"；order 11 = 排在引擎(10)后面，别抢位置。
+    ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+      name: 'sidebar.panellist',
+      id: PANEL_ID,
+      order: 11,
+      label: () => t('panel'),
+      locale: NS,
+    }, PanelBoardIcon as unknown as (props: never) => unknown))
+    // 输入框左侧的模式开关（conversation.input.left）：这是模式开关，不是板入口，保留。
     // inject 收到的第一个实参就是会话 id（宿主 slots 的 runInject 把 scope 绑定 key 传进来）。
     ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
       name: 'conversation.input.left',
@@ -1618,9 +1518,5 @@ export function apply(ctx: SlotsCtx): void {
       order: 0.5,
       inject: (sessionId: string) => ({ sessionId }),
     }, PlanBoardModeChip as unknown as (props: never) => unknown))
-    ctx.slots.inject('conversation.session.header.utilities', () =>
-      // 槽位 order 梯队（升序，勿与他插件撞值）：billing -2 → android-pane -1 → 本插件 -0.5 → SLog 0 → delete 1。
-      // v0.2.0 曾克隆 android-pane 骨架连 -1 一起复制，同槽同值导致「谁最后 reload 谁靠右」乒乓换位（09-16 四次实录）。
-      ctx.slots.register({ name: 'conversation.session.header.utilities', id: NS + ':entry', order: -0.5 }, PaneSidebarButton as unknown as (props: never) => unknown))
   }, NS + ':ui')
 }
