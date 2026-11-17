@@ -154,14 +154,17 @@ export async function pollPlanboard(ctx: SourceContext, config: PlanboardConfig,
   expireStaleAttempts(board, dispatched)
 
   // ③ 派单：就绪且本轮不重复派的任务。
-  const candidates = readyTasks(board).filter(task => shouldDispatch(task, dispatched))
+  //    用**收单之后**的板：收单会把结束的任务写成 blocked，而这一轮开始时读到的快照还是
+  //    ready —— 用旧快照会把刚结算的任务再派出去一次，节点就永远收不干净。
+  const current = PlanStore.open(config.project, BRIDGE_STORE_OPTS).board
+  const candidates = readyTasks(current).filter(task => shouldDispatch(task, dispatched))
   let dispatchedCount = 0
   let filtered = 0
   let failed = 0
   for (const task of candidates) {
     if (signal.aborted) throw new Error('The plan board source stopped during the dispatch')
     const attempt = attemptFor(task, dispatched)
-    const trigger = triggerFor(board, config, task, attempt)
+    const trigger = triggerFor(current, config, task, attempt)
     let result: ReceiveResult
     try {
       result = await ctx.receive(trigger)
