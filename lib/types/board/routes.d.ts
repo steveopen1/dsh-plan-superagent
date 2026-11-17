@@ -37,6 +37,10 @@ export interface PlanHook {
     (input: {
         project: string;
         sentence: string;
+        timeoutMs?: number;
+        maxAttempts?: number;
+        provider?: string;
+        model?: string;
     }): Promise<Record<string, unknown>>;
 }
 /** The plan-mode store and the announcer that tells a Session its mode changed. */

@@ -47,6 +47,9 @@ export interface PlannerContext {
 export interface CallModelRequest {
   system: string
   user: string
+  /** Override the host's default model; a provider/model pair the host already knows. */
+  provider?: string
+  model?: string
   signal?: AbortSignal
   /** 单次调用超时（毫秒）；0 = 不限时。 */
   timeoutMs?: number
@@ -72,7 +75,9 @@ export function currentSelection(ctx: unknown): LlmSelection | null {
 
 /** 调一次模型，返回完整文本。 */
 export async function callModel(ctx: unknown, req: CallModelRequest): Promise<string> {
-  const selection = currentSelection(ctx)
+  // An explicit provider/model wins over the host default: the default model's stream can break on
+  // long structured output, and a caller may know a better one.
+  const selection = (req.provider != null && req.model != null) ? { provider: req.provider, model: req.model } : currentSelection(ctx)
   if (selection == null) {
     throw new PlannerError('NO_MODEL', '没有可用模型：先在设置里选一个助手模型（不编数据，生成失败）')
   }

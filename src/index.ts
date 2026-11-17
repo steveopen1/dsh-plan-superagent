@@ -100,8 +100,8 @@ export function apply(ctx: Context, config: Partial<Config> = {}): () => void {
   }
 
   // ① 一句话规划：面板的输入框 -> 宿主模型 -> 三层任务树 + 每任务子导图 -> 全部进待批队列（人审门）。
-  const plan: PlanHook = async ({ project, sentence }) => {
-    const generated = await generatePlan({ ctx, sentence, context: collectRepoContext(project) })
+  const plan: PlanHook = async ({ project, sentence, timeoutMs, maxAttempts, provider, model }) => {
+    const generated = await generatePlan({ ctx, sentence, context: collectRepoContext(project), timeoutMs, maxAttempts, provider, model })
     const applied = applyPlanToBoard({
       plan: generated,
       project,

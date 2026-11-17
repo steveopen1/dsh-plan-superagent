@@ -30,6 +30,9 @@ export interface GenerateOptions {
   maxAttempts?: number
   /** 单次生成的最大 token，默认 12000。 */
   maxTokens?: number
+  /** 可选的模型指定（provider + model）；缺省用宿主默认模型。 */
+  provider?: string
+  model?: string
 }
 
 /** 严格 JSON 解析：只做「BOM / 思考块 / 整段代码围栏」三种精确清理，绝不按花括号切片。 */

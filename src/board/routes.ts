@@ -145,7 +145,7 @@ function validateEditedOps(proposed: EditOp[], edited: EditOp[]): string | undef
 
 /** One sentence in, a pending proposal out. The planner lives in the host half; the board only routes it. */
 export interface PlanHook {
-  (input: { project: string; sentence: string }): Promise<Record<string, unknown>>
+  (input: { project: string; sentence: string; timeoutMs?: number; maxAttempts?: number; provider?: string; model?: string }): Promise<Record<string, unknown>>
 }
 
 /** The plan-mode store and the announcer that tells a Session its mode changed. */
@@ -286,12 +286,55 @@ export function mountRoutes(
             const sentence = String(body.sentence ?? '').trim()
             if (sentence === '') { sendErr(res, 400, 'EMPTY_SENTENCE', '请先写一句需求'); return }
             try {
-              const result = await plan({ project, sentence })
+              const result = await plan({
+                project,
+                sentence,
+                timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : 240_000,
+                maxAttempts: typeof body.maxAttempts === 'number' ? body.maxAttempts : 3,
+                provider: typeof body.provider === 'string' ? body.provider : undefined,
+                model: typeof body.model === 'string' ? body.model : undefined,
+              })
               sendJson(res, 200, result)
             } catch (e) {
               // The planner reports its own problem (no model, invalid output); the panel shows it.
               sendJson(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) })
             }
+            return
+          }
+          if (sub === '/propose') {
+            // A plan that did not come from the model: the same human-approval gate as plan_edit,
+            // but without an LLM in the loop.
+            const ops = body.ops
+            if (!Array.isArray(ops)) { sendErr(res, 400, 'BAD_OPS', 'ops 必须是数组'); return }
+            const reason = String(body.reason ?? '').trim()
+            if (reason === '') { sendErr(res, 400, 'REASON_REQUIRED', '必须带 reason（审计留痕）'); return }
+            const list = ops as EditOp[]
+            const initOp = list.find(op => op.op === 'init_board') as { name?: unknown; goal?: unknown } | undefined
+            const store = PlanStore.ensure(
+              project,
+              registry.opts,
+              initOp != null ? { name: String(initOp.name ?? '未命名计划'), goal: String(initOp.goal ?? '') } : undefined,
+            )
+            const structural = list.filter(op => op.op === 'init_board' || op.op === 'add_node' || op.op === 'remove_node' || op.op === 'set_deps' ||
+              (op.op === 'update_node' && (op.fields.priority != null || op.fields.parent !== undefined)))
+            const info = list.filter(op => op.op === 'update_node' && !structural.includes(op))
+            const actor = String(body.by ?? 'human:panel')
+            const now = new Date().toISOString()
+            let appliedInfo = 0
+            let approvalId: string | null = null
+            if (info.length > 0) {
+              store.mutate(actor, 'plan_edit_info', { reason, ops: info }, (b) => { store.applyEditOps(info, now) })
+              appliedInfo = info.length
+            }
+            if (structural.length > 0) {
+              store.mutate(actor, 'plan_edit_proposed', { reason, ops: structural }, (b) => {
+                b.apSeq += 1
+                const id = 'ap-' + b.apSeq
+                b.pendingApprovals.push({ id, reason, ops: structural, by: actor, proposedAt: now })
+                approvalId = id
+              })
+            }
+            sendJson(res, 200, { ok: true, appliedInfo, approvalId, pendingApproval: approvalId != null, opCount: list.length })
             return
           }
           if (sub === '/remember') {

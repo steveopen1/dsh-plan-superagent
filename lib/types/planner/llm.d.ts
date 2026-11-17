@@ -32,6 +32,9 @@ export interface PlannerContext {
 export interface CallModelRequest {
     system: string;
     user: string;
+    /** Override the host's default model; a provider/model pair the host already knows. */
+    provider?: string;
+    model?: string;
     signal?: AbortSignal;
     /** 单次调用超时（毫秒）；0 = 不限时。 */
     timeoutMs?: number;
