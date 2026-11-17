@@ -114,9 +114,44 @@ function stationOf(b: Board): string | null {
   return doing.length > 0 ? doing[doing.length - 1].id : null
 }
 
+/** What an op touches, so an edited proposal can be checked against the original one. */
+function opTarget(op: unknown): string {
+  if (op == null || typeof op !== 'object') return ''
+  const o = op as { op?: unknown; id?: unknown; node?: { id?: unknown } }
+  if (o.op === 'add_node') return 'add:' + String(o.node?.id ?? '')
+  if (o.op === 'init_board') return 'init'
+  return String(o.op ?? '') + ':' + String(o.id ?? '')
+}
+
+/**
+ * Check the ops a person edited before they are applied.
+ *
+ * The panel may change a proposal's content or drop a row, but not invent work the agent never
+ * proposed: every submitted op has to match a proposed one, and unknown op kinds are refused.
+ * The board's own lint stays the second line of defence.
+ */
+function validateEditedOps(proposed: EditOp[], edited: EditOp[]): string | undefined {
+  const kinds = new Set(proposed.map(op => String((op as { op?: unknown }).op ?? '')))
+  for (const op of edited) {
+    const kind = String((op as { op?: unknown }).op ?? '')
+    if (!kinds.has(kind)) return '提案里没有这种操作: ' + kind
+  }
+  const targets = new Set(proposed.map(opTarget))
+  for (const op of edited) {
+    if (!targets.has(opTarget(op))) return '提案里没有这一项: ' + opTarget(op)
+  }
+  return undefined
+}
+
+/** One sentence in, a pending proposal out. The planner lives in the host half; the board only routes it. */
+export interface PlanHook {
+  (input: { project: string; sentence: string }): Promise<Record<string, unknown>>
+}
+
 export function mountRoutes(
   webServer: { register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void },
   registry: BoardRegistry,
+  plan?: PlanHook,
 ): () => void {
   const unregister = webServer.register({
     kind: 'prefix',
@@ -170,7 +205,14 @@ export function mountRoutes(
             const ap = store.board.pendingApprovals.find(x => x.id === approvalId)
             if (ap == null) { sendErr(res, 404, 'NO_APPROVAL', '待批项不存在: ' + approvalId); return }
             if (decision === 'approve') {
-              const ops = ap.ops
+              // The person may have edited the proposal in the panel; their ops win over the proposed ones.
+              let ops = ap.ops
+              if (Array.isArray(body.ops)) {
+                const edited = body.ops as EditOp[]
+                const problem = validateEditedOps(ap.ops, edited)
+                if (problem != null) { sendErr(res, 400, 'BAD_EDITED_OPS', problem); return }
+                ops = edited
+              }
               const now = new Date().toISOString()
               store.mutate('human:panel', 'plan_edit_approved', { approvalId, ops }, (b) => {
                 store.applyEditOps(ops, now)
@@ -206,6 +248,27 @@ export function mountRoutes(
               store2.addEvent(suspended ? 'guard_suspend' : 'guard_resume', 'human:panel', { by: 'panel' })
             } catch { /* 无板项目只切全局态 */ }
             sendJson(res, 200, { ok: true, suspended: registry.guard.isSuspended() })
+            return
+          }
+          if (sub === '/plan') {
+            if (plan == null) { sendErr(res, 501, 'NO_PLANNER', '规划器未装配'); return }
+            const sentence = String(body.sentence ?? '').trim()
+            if (sentence === '') { sendErr(res, 400, 'EMPTY_SENTENCE', '请先写一句需求'); return }
+            try {
+              const result = await plan({ project, sentence })
+              sendJson(res, 200, result)
+            } catch (e) {
+              // The planner reports its own problem (no model, invalid output); the panel shows it.
+              sendJson(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) })
+            }
+            return
+          }
+          if (sub === '/remember') {
+            // Register the project the panel is looking at, so the bridge can follow it even
+            // before the project has a board (the registry is otherwise written only on /state).
+            const name = String(body.name ?? '')
+            registry.remember(project, name !== '' ? name : project)
+            sendJson(res, 200, { ok: true, project, projects: registry.projects() })
             return
           }
           if (sub === '/edit') {

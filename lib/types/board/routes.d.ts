@@ -32,10 +32,17 @@ export declare class BoardRegistry {
     /** L7 观测面：非本插件工具调用全量留痕（tool-calls.jsonl，仅名称+agent，不落参数）。 */
     observeToolCall(toolName: string, agent: string): void;
 }
+/** One sentence in, a pending proposal out. The planner lives in the host half; the board only routes it. */
+export interface PlanHook {
+    (input: {
+        project: string;
+        sentence: string;
+    }): Promise<Record<string, unknown>>;
+}
 export declare function mountRoutes(webServer: {
     register(route: {
         kind: 'exact' | 'prefix';
         path: string;
         handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
     }): () => void;
-}, registry: BoardRegistry): () => void;
+}, registry: BoardRegistry, plan?: PlanHook): () => void;

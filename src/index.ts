@@ -15,6 +15,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { apply as applyBoard } from './board/index.js'
+import type { PlanHook } from './board/routes.js'
+import { applyPlanToBoard, collectRepoContext, generatePlan } from './planner/index.js'
 import { applyBridge } from './bridge/index.js'
 import { registerPlanner } from './planner/index.js'
 
@@ -95,14 +97,40 @@ export function apply(ctx: Context, config: Partial<Config> = {}): () => void {
     ctx.logger.warn('[dsh-plan-superagent] 配置服务挂载失败：%s', describe(error))
   }
 
-  // ① 板那半：自带嵌套 inject(['webServer','tools'])，web profile 才挂路由与板工具。
+  // ① 一句话规划：面板的输入框 -> 宿主模型 -> 三层任务树 + 每任务子导图 -> 全部进待批队列（人审门）。
+  const plan: PlanHook = async ({ project, sentence }) => {
+    const generated = await generatePlan({ ctx, sentence, context: collectRepoContext(project) })
+    const applied = applyPlanToBoard({
+      plan: generated,
+      project,
+      opts: { blockOnDrift: cfg.blockOnDrift },
+      actor: 'human:panel',
+      reason: 'plan_generate：' + generated.plan.goal,
+      designDir: cfg.subDesignDir,
+    })
+    return {
+      ok: true,
+      approvalId: applied.approvalId,
+      pendingApproval: applied.pendingApproval,
+      boardCreated: applied.boardCreated,
+      version: applied.version,
+      moduleCount: applied.moduleCount,
+      taskCount: applied.taskCount,
+      opCount: applied.opCount,
+      plan: { name: generated.plan.name, goal: generated.plan.goal },
+      modules: generated.modules.map(m => ({ id: m.id, title: m.title, tasks: m.tasks.map(t => ({ id: t.id, title: t.title })) })),
+      designFiles: applied.designFiles.map(d => ({ taskId: d.taskId, path: d.path, relative: d.relative })),
+    }
+  }
+
+  // ② 板那半：自带嵌套 inject(['webServer','tools'])，web profile 才挂路由与板工具。
   try {
     const disposeBoard = applyBoard(ctx as unknown as BoardHost, {
       stateDir: cfg.stateDir,
       blockOnDrift: cfg.blockOnDrift,
       observeTools: cfg.observeTools,
       enforceScope: cfg.enforceScope,
-    })
+    }, { plan })
     if (typeof disposeBoard === 'function') disposers.push(disposeBoard)
   } catch (error) {
     ctx.logger.error('[dsh-plan-superagent] 板加载失败（面板与板工具不可用）：%s', describe(error))

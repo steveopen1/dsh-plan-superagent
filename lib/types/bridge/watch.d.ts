@@ -23,6 +23,8 @@ export declare const KV_SETTLED: import("./contract.js").Key<string[]>;
 export interface WatchOptions {
     /** 配置缺省时的轮询间隔（秒）。 */
     defaultPollSeconds?: number;
+    /** The board registry's directory (where the panel records the projects it opened). */
+    stateDir?: string;
 }
 /** 桥写板用的 actor 标记（写进事件流，审计可追）。 */
 export declare const BRIDGE_ACTOR = "superagent:bridge";
@@ -55,7 +57,15 @@ export interface PollResult {
     failed: number;
 }
 /** 跑一轮：派单 + 收单。返回本轮统计（供健康条目展示）。 */
-export declare function pollPlanboard(ctx: SourceContext, config: PlanboardConfig, signal: AbortSignal): Promise<PollResult>;
+/**
+ * The project the bridge works on: the source setting, else the project the panel opened last.
+ *
+ * The panel and the bridge must not disagree about which project they are on, so an empty
+ * setting means "follow the panel" — the panel records every project it opens in the board
+ * registry, and the most recent one is the one the person is looking at.
+ */
+export declare function resolveProject(config: PlanboardConfig, stateDir?: string): string;
+export declare function pollPlanboard(ctx: SourceContext, config: PlanboardConfig, signal: AbortSignal, options?: WatchOptions): Promise<PollResult>;
 /**
  * 工单结束后的证据清单：工单号与结局、worker 的报告摘要（测试/CI/PR 链接通常在里面）、
  * 执行目录。摘要按行拆开，板面（ROADMAP 镜像）一行一条，读起来像人写的。

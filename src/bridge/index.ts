@@ -12,6 +12,7 @@
  * ——注销 kind、停轮询循环（并 await 循环收尾）。
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { CONFIG_SERVICE } from '../planner/index.js'
 import type { SourceHost } from './contract.js'
 import { PLANBOARD_HEALTH, planboardKind } from './source.js'
 import { watchPlanboard } from './watch.js'
@@ -25,6 +26,8 @@ export type BridgeHostContext = Context & { orchestrator?: SourceHost }
  * @param ctx 宿主上下文（cordis Context）。
  */
 export function applyBridge(ctx: Context): void {
+  // The board's registry directory (where the panel records the projects it opened).
+  const config = ctx.get(CONFIG_SERVICE) as { stateDir?: string } | undefined
   ctx.inject(['orchestrator'], (hostCtx) => {
     const host = hostCtx as BridgeHostContext
     const orchestrator = host.orchestrator
@@ -36,7 +39,7 @@ export function applyBridge(ctx: Context): void {
     // ② 起轮询循环：读板 → 派单 → 收单 → 回写证据。
     const source = orchestrator.context(planboardKind)
     const controller = new AbortController()
-    const running = watchPlanboard(source, controller.signal).catch((error: unknown) => {
+    const running = watchPlanboard(source, controller.signal, { stateDir: config?.stateDir }).catch((error: unknown) => {
       // DSH 会在未处理的 rejection 上结束进程，所以逃出循环的失败必须变成健康状态。
       try { source.report(PLANBOARD_HEALTH, { state: 'error', detail: String(error) }) }
       catch { /* 健康条目可能已经随卸载注销 */ }

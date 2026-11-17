@@ -1,5 +1,5 @@
 /**
- * dsh-plan-board client：右侧停靠面板（shell.overlay）+ 侧栏入口（header.utilities）。
+ * dsh-plan-superagent client：右侧停靠面板（shell.overlay）+ 侧栏入口（header.utilities）。
  * 两必坑（骨架实测）：apply 用 ctx.slots 必须 export const inject = ['slots']；register 必带 name。
  * M2 第一批：/stream NDJSON 实时 + 主题跟随（采样 body 亮度）。
  * M2 第三批（本文件主体）：面板直编辑——点选节点出编辑卡（标题/备注/验收/scope/优先级/依赖多选）、
@@ -12,9 +12,20 @@ import type { MutableRefObject, RefObject } from 'react'
 type WEv = { deltaY: number; preventDefault(): void }
 type PEv = { clientX: number; clientY: number; pointerId: number; target: Element; stopPropagation(): void }
 
-const NS = 'dsh-plan-board'
+const NS = 'dsh-plan-superagent'
 const API = '/_dsh/dsh-plan-board'
 const POLL_MS = 4000
+
+/** 面板记住的项目路径（localStorage 键）。与旧插件的键分开存，避免两个插件互相覆盖对方的项目路径。 */
+const PROJECT_KEY = 'dsh-plan-superagent.project'
+const PROJECT_KEY_OLD = 'planboard.project'
+
+/** 读面板的项目路径：优先新键；没有就从旧键搬一次（改名升级不丢用户已选的项目）。 */
+function loadProject(): string {
+  const v = localStorage.getItem(PROJECT_KEY)
+  if (v != null) return v
+  return localStorage.getItem(PROJECT_KEY_OLD) ?? ''
+}
 
 /**
  * 浏览器端的绝对路径判定（不能用 node:path）。
@@ -51,6 +62,238 @@ interface BoardData {
   events: { ts: string; seq: number; kind: string; actor: string; payload?: { taskId?: string; tool?: string; path?: string; note?: string } }[]
 }
 
+/**
+ * ===== 提案（待批 ops）的面板侧模型 =====
+ * 服务端 applyOps 只认这五种形状（src/board/schema.ts）：
+ *   { op:'init_board', name, goal }
+ *   { op:'add_node', node:{ id, type, title, parent?, deps?, priority?, acceptance?, scope? } }
+ *   { op:'update_node', id, fields:{ title?,note?,acceptance?,scope?,priority?,parent?,deps?,pos? } }
+ *   { op:'remove_node', id }
+ *   { op:'set_deps', id, deps }
+ * 面板改内容时必须保持原形状 —— 形状错了服务端 applyOps 直接抛 UNKNOWN_OP。
+ */
+const PLAN_TIMEOUT_MS = 180_000
+
+interface OpInit { op: 'init_board'; name: string; goal: string }
+interface OpAdd {
+  op: 'add_node'
+  node: { id: string; type: 'module' | 'task'; title: string; parent: string | null; deps: string[]; priority: number | null; acceptance: string[]; scope: string[] }
+}
+interface OpUpd { op: 'update_node'; id: string; fields: Record<string, unknown> }
+interface OpRem { op: 'remove_node'; id: string }
+interface OpDeps { op: 'set_deps'; id: string; deps: string[] }
+type PbOp = OpInit | OpAdd | OpUpd | OpRem | OpDeps
+
+/** 依赖多选的候选项（板子上的节点 + 同提案新增的节点）。 */
+interface DepOption { id: string; title: string; type: string }
+
+/** 多行文本 -> 字符串数组（每行一条，去空行）。 */
+function splitLines(s: string): string[] {
+  return s.split('\n').map(x => x.trim()).filter(x => x !== '')
+}
+
+/** 宽松取字符串数组（服务端字段可能缺失或类型不对）。 */
+function strArr(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+}
+
+/** 宽松取数字（缺失 -> null：区分「没设优先级」与「优先级 0」）。 */
+function numOr(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/** update_node.fields 白名单归一化：只保留 applyOps 认识的键（status 故意不给 —— 服务端会抛）。 */
+function normFields(v: unknown): Record<string, unknown> {
+  const o = (v ?? {}) as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  if (typeof o.title === 'string') out.title = o.title
+  if (typeof o.note === 'string') out.note = o.note
+  if (Array.isArray(o.acceptance)) out.acceptance = strArr(o.acceptance)
+  if (Array.isArray(o.scope)) out.scope = strArr(o.scope)
+  if (typeof o.priority === 'number') out.priority = o.priority
+  if ('parent' in o) out.parent = o.parent == null ? null : String(o.parent)
+  if (Array.isArray(o.deps)) out.deps = strArr(o.deps)
+  if ('pos' in o) out.pos = o.pos
+  return out
+}
+
+/** 服务端 ops（unknown[]）-> 面板可编辑的强类型 ops；认不出的 op 直接丢弃。 */
+function normOps(raw: unknown): PbOp[] {
+  const out: PbOp[] = []
+  if (!Array.isArray(raw)) return out
+  for (const item of raw) {
+    if (item == null || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const kind = String(o.op ?? '')
+    if (kind === 'init_board') {
+      out.push({ op: 'init_board', name: String(o.name ?? ''), goal: String(o.goal ?? '') })
+    } else if (kind === 'add_node') {
+      const n = (o.node ?? {}) as Record<string, unknown>
+      out.push({
+        op: 'add_node',
+        node: {
+          id: String(n.id ?? ''),
+          type: n.type === 'task' ? 'task' : 'module',
+          title: String(n.title ?? ''),
+          parent: n.parent == null ? null : String(n.parent),
+          deps: strArr(n.deps),
+          priority: numOr(n.priority),
+          acceptance: strArr(n.acceptance),
+          scope: strArr(n.scope),
+        },
+      })
+    } else if (kind === 'update_node') {
+      out.push({ op: 'update_node', id: String(o.id ?? ''), fields: normFields(o.fields) })
+    } else if (kind === 'remove_node') {
+      out.push({ op: 'remove_node', id: String(o.id ?? '') })
+    } else if (kind === 'set_deps') {
+      out.push({ op: 'set_deps', id: String(o.id ?? ''), deps: strArr(o.deps) })
+    }
+  }
+  return out
+}
+
+/** 单条 op 的比较键（字段顺序无关；只比较服务端真正会应用的字段）。 */
+function canonOp(op: PbOp): string {
+  if (op.op === 'init_board') return JSON.stringify(['init_board', op.name, op.goal])
+  if (op.op === 'add_node') {
+    return JSON.stringify(['add_node', op.node.id, op.node.type, op.node.title, op.node.parent,
+      [...op.node.deps].sort(), op.node.priority, op.node.acceptance, op.node.scope])
+  }
+  if (op.op === 'update_node') {
+    const f = op.fields
+    return JSON.stringify(['update_node', op.id,
+      f.title ?? null, f.note ?? null, f.acceptance ?? null, f.scope ?? null,
+      f.priority ?? null, f.parent ?? null, f.deps ?? null, f.pos ?? null])
+  }
+  if (op.op === 'remove_node') return JSON.stringify(['remove_node', op.id])
+  return JSON.stringify(['set_deps', op.id, [...op.deps].sort()])
+}
+
+/** 两组 ops 语义上是否不同（决定「确认生效」要不要带 ops 覆盖原提案）。 */
+function opsChanged(a: PbOp[], b: PbOp[]): boolean {
+  if (a.length !== b.length) return true
+  for (let i = 0; i < a.length; i++) if (canonOp(a[i]) !== canonOp(b[i])) return true
+  return false
+}
+
+/** 面板 op -> 回传服务端的线格式（形状必须与 applyOps 一致）。 */
+function toWire(op: PbOp): Record<string, unknown> {
+  if (op.op === 'init_board') return { op: 'init_board', name: op.name, goal: op.goal }
+  if (op.op === 'add_node') {
+    const node: Record<string, unknown> = {
+      id: op.node.id, type: op.node.type, title: op.node.title,
+      parent: op.node.parent, deps: op.node.deps,
+      acceptance: op.node.acceptance, scope: op.node.scope,
+    }
+    if (op.node.priority != null) node.priority = op.node.priority
+    return { op: 'add_node', node }
+  }
+  if (op.op === 'update_node') return { op: 'update_node', id: op.id, fields: op.fields }
+  if (op.op === 'remove_node') return { op: 'remove_node', id: op.id }
+  return { op: 'set_deps', id: op.id, deps: op.deps }
+}
+
+/** 提案应用后的依赖图（id -> deps）：板子现状 + 提案里的增删改。 */
+function proposalDepGraph(base: { id: string; deps: string[] }[], ops: PbOp[]): Map<string, string[]> {
+  const g = new Map<string, string[]>()
+  for (const n of base) g.set(n.id, [...(n.deps ?? [])])
+  for (const op of ops) {
+    if (op.op === 'add_node') { g.set(op.node.id, [...op.node.deps]); continue }
+    if (op.op === 'update_node') {
+      const d = op.fields.deps
+      if (Array.isArray(d)) g.set(op.id, [...(d as string[])])
+      continue
+    }
+    if (op.op === 'set_deps') { g.set(op.id, [...op.deps]); continue }
+    if (op.op === 'remove_node') {
+      g.delete(op.id)
+      for (const [k, v] of g) g.set(k, v.filter(x => x !== op.id))
+    }
+  }
+  return g
+}
+
+/**
+ * 提案里会不会依赖成环（返回成环路径，空串 = 无环）。
+ * 服务端 lint 也会兜底，但前端先挡住：否则用户点「确认生效」才被服务端拒，现场很难看懂。
+ */
+function proposalCycle(base: { id: string; deps: string[] }[], ops: PbOp[]): string {
+  const g = proposalDepGraph(base, ops)
+  const items = [...g.entries()].map(([id, deps]) => ({ id, deps }))
+  const byId = new Map(items.map(i => [i.id, i]))
+  const color = new Map<string, number>()
+  const stack: string[] = []
+  // 用空数组当「没找到环」的哨兵：闭包里赋值时 TS 的控制流分析看不到赋值（null 哨兵会被收成 never）
+  let cycle: string[] = []
+  const dfs = (id: string): void => {
+    if (cycle.length > 0) return
+    const c = color.get(id)
+    if (c === 2) return
+    if (c === 1) { cycle = stack.slice(stack.indexOf(id)).concat([id]); return }
+    color.set(id, 1)
+    stack.push(id)
+    for (const d of byId.get(id)?.deps ?? []) {
+      if (!byId.has(d)) continue
+      if (color.get(d) === 1) { cycle = stack.slice(stack.indexOf(d)).concat([d]); return }
+      if (color.get(d) == null) dfs(d)
+      if (cycle.length > 0) return
+    }
+    stack.pop()
+    color.set(id, 2)
+  }
+  for (const i of items) { dfs(i.id); if (cycle.length > 0) break }
+  return cycle.length === 0 ? '' : cycle.join(' -> ')
+}
+
+/**
+ * 提案里 task 的父模块是否可解。
+ * 删掉某个模块的 add_node，它名下的任务就成了孤儿 —— 服务端 applyOps 会抛 BAD_PARENT，前端先提醒。
+ */
+function proposalParentIssues(base: { id: string; type: string }[], ops: PbOp[]): string[] {
+  const moduleIds = new Set<string>(base.filter(n => n.type === 'module').map(n => n.id))
+  for (const op of ops) if (op.op === 'add_node' && op.node.type === 'module') moduleIds.add(op.node.id)
+  const issues: string[] = []
+  for (const op of ops) {
+    if (op.op !== 'add_node' || op.node.type !== 'task') continue
+    const p = op.node.parent
+    if (p == null || !moduleIds.has(p)) issues.push('任务 ' + op.node.id + ' 的父模块 ' + (p ?? '(空)') + ' 不在板子/提案里 —— 批准会被服务端拒')
+  }
+  return issues
+}
+
+/** 依赖候选项合并（提案新增的节点覆盖板子里同 id 的旧标题）。 */
+function mergeDepOptions(base: DepOption[], extra: DepOption[]): DepOption[] {
+  const out = base.slice()
+  for (const e of extra) {
+    const i = out.findIndex(x => x.id === e.id)
+    if (i >= 0) out[i] = e
+    else out.push(e)
+  }
+  return out
+}
+
+/** 错误体 -> 可读文本（服务端两种形状：字符串 / {code,message}）。 */
+function errText(e: unknown): string {
+  if (e == null) return '未知错误'
+  if (typeof e === 'string') return e
+  if (typeof e === 'object') {
+    const o = e as Record<string, unknown>
+    if (typeof o.message === 'string') return o.message
+    if (typeof o.code === 'string') return o.code
+  }
+  return String(e)
+}
+
+/** 安全读 JSON（404/网关可能回 HTML，抛 SyntaxError 对用户没意义）。 */
+async function readJson(r: Response): Promise<Record<string, unknown>> {
+  try { return await r.json() as Record<string, unknown> } catch { return { ok: false, error: 'HTTP ' + r.status + '：响应不是合法 JSON' } }
+}
+
+/** 文本截断（标签太长会把面板挤爆）。 */
+function clip(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + '…' : s
+}
 const STATUS_COLOR: Record<string, string> = {
   planned: '#94a3b8', ready: '#3b82f6', doing: '#f59e0b',
   blocked: '#ef4444', done: '#10b981', canceled: '#6b7280',
@@ -59,7 +302,7 @@ const STATUS_COLOR: Record<string, string> = {
 let openState = false
 function togglePanel(): void {
   openState = !openState
-  window.dispatchEvent(new CustomEvent('planboard:toggle'))
+  window.dispatchEvent(new CustomEvent('dsh-plan-superagent:toggle'))
 }
 
 /** 主题跟随：采样 app body 实际背景亮度；异常时退回系统偏好。 */
@@ -197,14 +440,44 @@ const CSS = [
   '.pb-entry.pb-on .pb-aurora{opacity:1;animation:pb-aurora 3.2s ease-in-out infinite}',
   '@keyframes pb-aurora{0%,100%{opacity:.8;filter:saturate(1)}50%{opacity:1;filter:saturate(1.35)}}',
   '@media (prefers-reduced-motion:reduce){.pb-entry,.pb-entry *{animation:none!important;transition:none!important}}',
+  // ===== 一句话生成 / 项目切换 / 提案编辑 =====
+  '.pb-projrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--pb-line);font-size:11px;color:var(--pb-muted)}',
+  '.pb-projpath{font-family:ui-monospace,monospace;font-size:11px;color:var(--pb-ink);cursor:pointer;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.pb-tag{cursor:pointer;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.pb-tag.pb-on{border-color:#8b5cf6;color:#7c3aed;background:rgba(139,92,246,.12)}',
+  '[data-mode="dark"] .pb-tag.pb-on{color:#a78bfa}',
+  '.pb-tag:hover{filter:brightness(1.08)}',
+  '.pb-oneline{display:flex;gap:6px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--pb-line)}',
+  '.pb-oneline .pb-input{font-family:ui-sans-serif,system-ui,sans-serif}',
+  '.pb-planmsg{padding:7px 12px;font-size:11px;line-height:1.6;background:rgba(139,92,246,.10);border-bottom:1px solid rgba(139,92,246,.35);color:#7c3aed;word-break:break-word}',
+  '[data-mode="dark"] .pb-planmsg{color:#a78bfa}',
+  '.pb-planmsg.pb-err{background:rgba(239,68,68,.12);border-bottom-color:rgba(239,68,68,.5);color:#ef4444}',
+  '.pb-ops{border:1px dashed var(--pb-line);border-radius:8px;padding:6px;margin:6px 0;display:flex;flex-direction:column;gap:6px;background:rgba(100,116,139,.05)}',
+  '.pb-oprow{border:1px solid var(--pb-line);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:5px;background:var(--pb-card)}',
+  '.pb-ophead{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--pb-muted)}',
+  '.pb-chip{font:10px/1.4 ui-monospace,monospace;padding:1px 6px;border-radius:999px;background:rgba(139,92,246,.12);color:#7c3aed}',
+  '[data-mode="dark"] .pb-chip{color:#a78bfa}',
+  '.pb-oplabel{display:flex;flex-direction:column;gap:2px;font-size:10px;font-weight:600;color:var(--pb-muted)}',
+  '.pb-oplabel input,.pb-oplabel textarea,.pb-oplabel select{font:11px/1.5 ui-sans-serif,system-ui,sans-serif;padding:3px 6px;border-radius:6px;border:1px solid var(--pb-line);background:var(--pb-bg);color:var(--pb-ink)}',
+  '.pb-oplabel textarea{min-height:38px;resize:vertical;font:11px/1.5 ui-monospace,monospace}',
+  '.pb-deps{display:flex;flex-direction:column;gap:2px;max-height:150px;overflow:auto;border:1px solid var(--pb-line);border-radius:6px;padding:4px;background:var(--pb-bg)}',
+  '.pb-deps .pb-deprow{font-size:11px}',
+  '.pb-cycle{font-size:11px;font-weight:700;color:#ef4444;line-height:1.5}',
 ].join('\n')
 
 function ensureStyles(): void {
-  if (document.getElementById('planboard-css') != null) return
+  if (document.getElementById('dsh-plan-superagent-css') != null) return
   const el = document.createElement('style')
-  el.id = 'planboard-css'
+  el.id = 'dsh-plan-superagent-css'
   el.textContent = CSS
   document.head.appendChild(el)
+}
+
+/** Register the project the panel is on, so the bridge can follow it even before it has a board. */
+async function rememberProject(path: string): Promise<void> {
+  const value = path.trim()
+  if (value === '') return
+  try { await post('/remember', { project: value, name: value }) } catch { /* the registry is a convenience */ }
 }
 
 async function post(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -232,15 +505,15 @@ function PaneSidebarButton(): ReturnType<typeof h> {
   }, [])
   useEffect(() => {
     const f = (): void => setOn(openState)
-    window.addEventListener('planboard:toggle', f)
-    return () => window.removeEventListener('planboard:toggle', f)
+    window.addEventListener('dsh-plan-superagent:toggle', f)
+    return () => window.removeEventListener('dsh-plan-superagent:toggle', f)
   }, [])
   useEffect(() => {
     let stop = false
     const tick = async (): Promise<void> => {
       if (stop) return
       setMode(appDark() ? 'dark' : 'light')
-      const project = localStorage.getItem('planboard.project') ?? ''
+      const project = loadProject()
       if (!isAbsoluteProject(project)) { setStat({ kind: 'none', tip: '未设置项目路径（点开面板填写）' }); return }
       try {
         const r = await fetch(API + '/state?project=' + encodeURIComponent(project))
@@ -287,8 +560,8 @@ function PaneSidebarButton(): ReturnType<typeof h> {
     ref: btnRef,
     onClick: togglePanel,
     'aria-pressed': on,
-    title: 'dsh-plan-board 规划面板 · ' + stat.tip,
-    'aria-label': 'dsh-plan-board 规划面板，' + stat.tip,
+    title: 'dsh-plan-superagent 规划面板 · ' + stat.tip,
+    'aria-label': 'dsh-plan-superagent 规划面板，' + stat.tip,
   },
     h('span', { className: 'pb-aurora', key: 'aurora', 'aria-hidden': 'true' }),
     h('span', { className: 'pb-ring', key: 'ring', 'aria-hidden': 'true' }),
@@ -468,9 +741,147 @@ function MindMap(props: MapProps): ReturnType<typeof h> {
         }))));
 }
 
-function PaneWindow(): ReturnType<typeof h> {
+/** 依赖多选（候选项来自板子节点 + 同提案新增的节点）。 */
+function DepPicker(props: { options: DepOption[]; value: string[]; onChange: (v: string[]) => void }): ReturnType<typeof h> {
+  const { options, value, onChange } = props
+  return h('div', { className: 'pb-deps' },
+    options.length === 0 ? h('span', { className: 'pb-hint' }, '（暂无可选依赖节点）') : null,
+    options.map(o => h('label', { className: 'pb-deprow', key: o.id },
+      h('input', {
+        type: 'checkbox',
+        checked: value.includes(o.id),
+        onChange: (e: { target: { checked: boolean } }) => {
+          const arr = value.slice()
+          const i = arr.indexOf(o.id)
+          if (e.target.checked && i < 0) arr.push(o.id)
+          if (!e.target.checked && i >= 0) arr.splice(i, 1)
+          onChange(arr)
+        },
+      }),
+      h('span', {}, o.id + ' · ' + clip(o.title, 26)))))
+}
+
+interface ApprovalCardProps {
+  ap: { id: string; reason: string; by: string; proposedAt: string }
+  ops: PbOp[]
+  origOps: PbOp[]
+  dirty: boolean
+  cycle: string
+  issues: string[]
+  options: DepOption[]
+  busy: boolean
+  rev: number
+  onOps: (ops: PbOp[]) => void
+  onReset: () => void
+  onApprove: () => void
+  onReject: () => void
+}
+
+/**
+ * 待批提案卡：把 ops 摊开成可编辑的行。
+ * 用户真正的痛点是「一句话生成的导图没法手改」—— 以前只能确认/驳回，现在能改标题、验收、scope、
+ * 依赖、优先级，能删掉某条 op（= 不创建那个节点），改完再把改过的 ops 一起提交。
+ */
+function ApprovalCard(props: ApprovalCardProps): ReturnType<typeof h> {
+  const { ap, ops, origOps, dirty, cycle, issues, options, busy, rev, onOps, onReset, onApprove, onReject } = props
+  const patch = (i: number, next: PbOp): void => { onOps(ops.map((o, k) => (k === i ? next : o))) }
+  const patchNode = (i: number, p: Partial<OpAdd['node']>): void => {
+    const o = ops[i]
+    if (o == null || o.op !== 'add_node') return
+    patch(i, { ...o, node: { ...o.node, ...p } })
+  }
+  const patchFields = (i: number, p: Record<string, unknown>): void => {
+    const o = ops[i]
+    if (o == null || o.op !== 'update_node') return
+    patch(i, { ...o, fields: { ...o.fields, ...p } })
+  }
+  const dropOp = (i: number): void => { onOps(ops.filter((_, k) => k !== i)) }
+  const lbl = (text: string, ctrl: ReturnType<typeof h>): ReturnType<typeof h> => h('label', { className: 'pb-oplabel' }, text, ctrl)
+  const prio = (cur: number | null, onChange: (v: number) => void): ReturnType<typeof h> =>
+    h('select', { value: String(cur ?? 3), onChange: (e: { target: { value: string } }) => onChange(Number(e.target.value)) },
+      [1, 2, 3, 4, 5].map(p => h('option', { key: p, value: String(p) }, 'P' + p)))
+  const delBtn = (i: number): ReturnType<typeof h> =>
+    h('button', { className: 'pb-btn', style: { marginLeft: 'auto' }, onClick: () => dropOp(i) }, '删除此条')
+  const rows = ops.map((op, i) => {
+    if (op.op === 'init_board') {
+      const nameVal = op.name
+      const goalVal = op.goal
+      return h('div', { className: 'pb-oprow', key: 'op' + i },
+        h('div', { className: 'pb-ophead' },
+          h('span', { className: 'pb-chip' }, 'init_board'),
+          delBtn(i)),
+        lbl('计划名', h('input', { value: nameVal, onChange: (e: { target: { value: string } }) => patch(i, { ...op, name: e.target.value }) })),
+        lbl('目标', h('textarea', { key: 'goal' + rev, defaultValue: goalVal, onChange: (e: { target: { value: string } }) => patch(i, { ...op, goal: e.target.value }) })))
+    }
+    if (op.op === 'add_node') {
+      const n = op.node
+      return h('div', { className: 'pb-oprow', key: 'op' + i },
+        h('div', { className: 'pb-ophead' },
+          h('span', { className: 'pb-chip' }, 'add_node'),
+          h('span', { className: 'pb-chip' }, n.type === 'task' ? '任务' : '模块'),
+          h('span', { className: 'pb-chip' }, n.id),
+          delBtn(i)),
+        lbl('标题', h('input', { value: n.title, onChange: (e: { target: { value: string } }) => patchNode(i, { title: e.target.value }) })),
+        lbl('验收标准（每行一条）', h('textarea', { key: 'acc' + rev, defaultValue: n.acceptance.join('\n'), onChange: (e: { target: { value: string } }) => patchNode(i, { acceptance: splitLines(e.target.value) }) })),
+        lbl('scope（每行一条，目录以 / 结尾）', h('textarea', { key: 'scope' + rev, defaultValue: n.scope.join('\n'), onChange: (e: { target: { value: string } }) => patchNode(i, { scope: splitLines(e.target.value) }) })),
+        lbl('优先级', prio(n.priority, v => patchNode(i, { priority: v }))),
+        h('div', { className: 'pb-oplabel' }, '依赖（前置节点，可多选）',
+          h(DepPicker, { options: options.filter(o => o.id !== n.id), value: n.deps, onChange: (v: string[]) => patchNode(i, { deps: v }) })))
+    }
+    if (op.op === 'update_node') {
+      const f = op.fields
+      // 先取到局部 const：字段窄化在闭包里会丢（TS 不会把 f.title 的窄化带进 onChange）
+      const titleVal = typeof f.title === 'string' ? f.title : null
+      const noteVal = typeof f.note === 'string' ? f.note : null
+      const accVal = Array.isArray(f.acceptance) ? (f.acceptance as string[]) : null
+      const scopeVal = Array.isArray(f.scope) ? (f.scope as string[]) : null
+      const prioVal = typeof f.priority === 'number' ? f.priority : null
+      const depsVal = Array.isArray(f.deps) ? (f.deps as string[]) : null
+      return h('div', { className: 'pb-oprow', key: 'op' + i },
+        h('div', { className: 'pb-ophead' },
+          h('span', { className: 'pb-chip' }, 'update_node'),
+          h('span', { className: 'pb-chip' }, op.id),
+          delBtn(i)),
+        titleVal != null ? lbl('标题', h('input', { value: titleVal, onChange: (e: { target: { value: string } }) => patchFields(i, { title: e.target.value }) })) : null,
+        noteVal != null ? lbl('备注（生成器写的是子导图指针，改坏了子导图就找不到）', h('textarea', { key: 'unote' + rev, defaultValue: noteVal, onChange: (e: { target: { value: string } }) => patchFields(i, { note: e.target.value }) })) : null,
+        accVal != null ? lbl('验收标准（每行一条）', h('textarea', { key: 'uacc' + rev, defaultValue: accVal.join('\n'), onChange: (e: { target: { value: string } }) => patchFields(i, { acceptance: splitLines(e.target.value) }) })) : null,
+        scopeVal != null ? lbl('scope（每行一条）', h('textarea', { key: 'uscope' + rev, defaultValue: scopeVal.join('\n'), onChange: (e: { target: { value: string } }) => patchFields(i, { scope: splitLines(e.target.value) }) })) : null,
+        prioVal != null ? lbl('优先级', prio(prioVal, v => patchFields(i, { priority: v }))) : null,
+        depsVal != null ? h('div', { className: 'pb-oplabel' }, '依赖（可多选）',
+          h(DepPicker, { options: options.filter(o => o.id !== op.id), value: depsVal, onChange: (v: string[]) => patchFields(i, { deps: v }) })) : null)
+    }
+    if (op.op === 'remove_node') {
+      return h('div', { className: 'pb-oprow', key: 'op' + i },
+        h('div', { className: 'pb-ophead' },
+          h('span', { className: 'pb-chip' }, 'remove_node'),
+          h('span', { className: 'pb-chip' }, op.id),
+          delBtn(i)),
+        h('div', { className: 'pb-hint' }, '生效后会移除节点 ' + op.id))
+    }
+    return h('div', { className: 'pb-oprow', key: 'op' + i },
+      h('div', { className: 'pb-ophead' },
+        h('span', { className: 'pb-chip' }, 'set_deps'),
+        h('span', { className: 'pb-chip' }, op.id),
+        delBtn(i)),
+      h('div', { className: 'pb-oplabel' }, '依赖（可多选）',
+        h(DepPicker, { options: options.filter(o => o.id !== op.id), value: op.deps, onChange: (v: string[]) => patch(i, { ...op, deps: v }) })))
+  })
+  return h('div', { className: 'pb-card' },
+    h('div', { style: { fontWeight: 700, marginBottom: '4px' } }, ap.id + ' · ' + ops.length + ' ops · ' + ap.by),
+    h('div', { style: { opacity: .8, marginBottom: '6px' } }, ap.reason),
+    h('div', { className: 'pb-ops' },
+      rows.length === 0 ? h('div', { className: 'pb-hint' }, '（这条提案的操作都被你删了 —— 批准它等于什么都不做）') : rows),
+    cycle !== '' ? h('div', { className: 'pb-cycle' }, '⛔ 依赖会成环：' + cycle + '（先去掉其中一条再批准）') : null,
+    issues.map((x, i) => h('div', { className: 'pb-cycle', key: 'iss' + i }, '⚠ ' + x)),
+    h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '6px', flexWrap: 'wrap' } },
+      h('button', { className: 'pb-btn pb-ok', disabled: busy || cycle !== '', onClick: onApprove }, dirty ? '确认生效（按你的修改）' : '确认生效'),
+      h('button', { className: 'pb-btn pb-no', disabled: busy, onClick: onReject }, '驳回'),
+      h('button', { className: 'pb-btn', disabled: busy || !dirty, onClick: onReset }, '重置为原提案'),
+      h('span', { className: 'pb-hint' }, dirty ? '已修改（原 ' + origOps.length + ' 条 → 现 ' + ops.length + ' 条）' : '未修改')))
+}
+function PaneWindow(): ReturnType<typeof h> | null {
   const [open, setOpen] = useState(openState)
-  const [project, setProject] = useState(localStorage.getItem('planboard.project') ?? '')
+  const [project, setProject] = useState(loadProject())
   const [data, setData] = useState<BoardData | null>(null)
   const [err, setErr] = useState('')
   const [nonce, setNonce] = useState(0)
@@ -484,18 +895,33 @@ function PaneWindow(): ReturnType<typeof h> {
   const [depLine, setDepLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null)
   const [newChild, setNewChild] = useState('')
   const [recent, setRecent] = useState<{ project: string; name: string }[]>([])
+  // ===== 一句话生成（POST /plan）+ 待批提案编辑态 =====
+  const [sentence, setSentence] = useState('')
+  const [planBusy, setPlanBusy] = useState(false)
+  const [planMsg, setPlanMsg] = useState('')
+  const [planMsgErr, setPlanMsgErr] = useState(false)
+  const [projListOpen, setProjListOpen] = useState(false)
+  const [apEdits, setApEdits] = useState<Record<string, PbOp[]>>({})
+  const [apBusy, setApBusy] = useState('')
+  const [apRev, setApRev] = useState(0)
+  const planAbortRef = useRef<AbortController | null>(null)
+  const planCancelRef = useRef(false)
+  const planTimeoutRef = useRef(false)
+  // 依赖候选项 = 板子上的节点（提案新增的节点在渲染时再并进来）
+  const depOptions = useMemo<DepOption[]>(() => (data?.board.nodes ?? []).map(n => ({ id: n.id, title: n.title, type: n.type })), [data])
   const [view, setView] = useState({ k: 1, tx: 0, ty: 0 })
   const dragRef = useRef<{ kind: 'node'; id: string; sx: number; sy: number; bx: number; by: number; moved: boolean } | { kind: 'dep'; from: string } | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const editorRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     const f = (): void => setOpen(openState)
-    window.addEventListener('planboard:toggle', f)
-    return () => window.removeEventListener('planboard:toggle', f)
+    window.addEventListener('dsh-plan-superagent:toggle', f)
+    return () => window.removeEventListener('dsh-plan-superagent:toggle', f)
   }, [])
   useEffect(() => {
     const t = setInterval(() => { const d = appDark(); setMode(prev => (prev === (d ? 'dark' : 'light') ? prev : (d ? 'dark' : 'light'))) }, 2000)
-    return () => clearInterval(t)
+    // 面板被关掉时中止在途的生成请求（否则回调会打到已卸载的组件上）
+    return () => { clearInterval(t); planAbortRef.current?.abort() }
   }, [])
   useEffect(() => {
     if (!open || !isAbsoluteProject(project)) return
@@ -527,7 +953,7 @@ function PaneWindow(): ReturnType<typeof h> {
   }, [open, project])
   useEffect(() => {
     if (!open || !isAbsoluteProject(project)) return
-    localStorage.setItem('planboard.project', project)
+    localStorage.setItem(PROJECT_KEY, project)
     let stop = false
     const tick = async (): Promise<void> => {
       try {
@@ -695,6 +1121,95 @@ function PaneWindow(): ReturnType<typeof h> {
     setSaving(false);
   };
   const discard = (): void => { setDrafts({}); setAdded([]); setRemoved([]); setEditorId(null); setSaveMsg('') };
+  // ===== 一句话生成导图：服务端 LLM 出三层树 + 每任务子导图，进待批队列（人审门保留） =====
+  const submitPlan = async (): Promise<void> => {
+    const s = sentence.trim()
+    if (s === '' || planBusy) return
+    if (!isAbsoluteProject(project)) {
+      setPlanMsgErr(true)
+      setPlanMsg('⚠ 先在上面填项目根目录绝对路径（Windows 形如 C:\\Users\\me\\project）')
+      return
+    }
+    const ctrl = new AbortController()
+    planAbortRef.current = ctrl
+    planCancelRef.current = false
+    planTimeoutRef.current = false
+    setPlanBusy(true)
+    setPlanMsgErr(false)
+    setPlanMsg('⏳ 正在按这句话生成导图（LLM 可能要几十秒，可随时取消）…')
+    const timer = setTimeout(() => { planTimeoutRef.current = true; ctrl.abort() }, PLAN_TIMEOUT_MS)
+    try {
+      const r = await fetch(API + '/plan', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ project, sentence: s }),
+        signal: ctrl.signal,
+      })
+      const j = await readJson(r)
+      if (j.ok !== true) {
+        setPlanMsgErr(true)
+        setPlanMsg('⛔ 生成失败：' + errText(j.error))
+        return
+      }
+      setSentence('')
+      const mods = Number(j.moduleCount ?? 0)
+      const tasks = Number(j.taskCount ?? 0)
+      const apId = String(j.approvalId ?? '')
+      const planName = String((j.plan as { name?: unknown } | undefined)?.name ?? '')
+      setPlanMsgErr(false)
+      setPlanMsg('✅ 已生成 ' + mods + ' 个模块 / ' + tasks + ' 个任务' + (planName !== '' ? '（' + planName + '）' : '')
+        + '，待你确认：' + apId + (j.pendingApproval === false ? '（服务端已直接生效）' : '（下面可直接改内容）'))
+      setNonce(n => n + 1)
+    } catch (e) {
+      if (planCancelRef.current) {
+        setPlanMsgErr(false)
+        setPlanMsg('已取消')
+      } else if (planTimeoutRef.current) {
+        setPlanMsgErr(true)
+        setPlanMsg('⛔ 生成超时（' + Math.round(PLAN_TIMEOUT_MS / 1000) + 's）——可以重试或换句话说')
+      } else {
+        setPlanMsgErr(true)
+        setPlanMsg('⛔ 生成失败：' + String(e))
+      }
+    } finally {
+      clearTimeout(timer)
+      if (planAbortRef.current === ctrl) planAbortRef.current = null
+      setPlanBusy(false)
+    }
+  }
+  const cancelPlan = (): void => {
+    planCancelRef.current = true
+    planAbortRef.current?.abort()
+  }
+  // ===== 待批提案：确认时可带改过的 ops（服务端用提交的 ops 覆盖原提案再生效） =====
+  const approveAp = async (ap: { id: string; ops: unknown[] }): Promise<void> => {
+    const orig = normOps(ap.ops)
+    const edited = apEdits[ap.id] ?? orig
+    const body: Record<string, unknown> = { project, approvalId: ap.id, decision: 'approve' }
+    // 只有人真改了才带 ops：不带 = 按原提案生效（对还没支持 ops 覆盖的服务端也安全）
+    if (opsChanged(orig, edited)) body.ops = edited.map(toWire)
+    setApBusy(ap.id)
+    setSaveMsg('')
+    try {
+      const j = await post('/approve', body)
+      if (j.ok === true) {
+        setApEdits(prev => { const n = { ...prev }; delete n[ap.id]; return n })
+        setNonce(n => n + 1)
+      } else setSaveMsg('⛔ 批准失败：' + errText(j.error))
+    } catch (e) { setSaveMsg('⛔ 批准失败：' + String(e)) }
+    setApBusy('')
+  }
+  const rejectAp = async (ap: { id: string }): Promise<void> => {
+    setApBusy(ap.id)
+    try {
+      const j = await post('/approve', { project, approvalId: ap.id, decision: 'reject' })
+      if (j.ok === true) {
+        setApEdits(prev => { const n = { ...prev }; delete n[ap.id]; return n })
+        setNonce(n => n + 1)
+      } else setSaveMsg('⛔ 驳回失败：' + errText(j.error))
+    } catch (e) { setSaveMsg('⛔ 驳回失败：' + String(e)) }
+    setApBusy('')
+  }
   const editor = editorId != null ? effNodes.find(n => n.id === editorId) : undefined;
   const tasksOf = (pred: (n: BoardNode) => boolean): BoardNode[] => effNodes.filter(n => n.type === 'task' && !removed.includes(n.id) && pred(n));
   const fd = (editor != null ? drafts[editor.id]?.fields : undefined) ?? {};
@@ -749,16 +1264,39 @@ function PaneWindow(): ReturnType<typeof h> {
   return h('div', { className: 'pb-panel', 'data-mode': mode },
     h('div', { className: 'pb-head' },
       h('span', { className: 'pb-title' }, '🗺 PlanBoard'),
-      h('input', { className: 'pb-input', value: project, placeholder: '项目根目录绝对路径，如 /path/to/your/project 或 C:\\path\\to\\project', onChange: (e: { target: { value: string } }) => setProject(e.target.value) }),
+      h('input', { className: 'pb-input', value: project, placeholder: '项目根目录绝对路径，如 /path/to/your/project 或 C:\\path\\to\\project', onChange: (e: { target: { value: string } }) => setProject(e.target.value), onBlur: () => { void rememberProject(project) } }),
       h('button', { className: 'pb-btn', onClick: togglePanel }, '收起'),
     ),
+    // ===== 顶部常驻区：项目切换 + 一句话生成（不用切到聊天框） =====
+    h('div', { className: 'pb-projrow' },
+      h('span', {}, '当前项目：'),
+      h('span', { className: 'pb-projpath', title: project, onClick: () => setProjListOpen(v => !v) }, project.trim() === '' ? '（未设置）' : project),
+      h('span', { className: 'pb-hint', style: { cursor: 'pointer' }, onClick: () => setProjListOpen(v => !v) }, '（点此切换）'),
+      recent.slice(0, 12).map(r => h('button', {
+        key: r.project,
+        className: 'pb-tag' + (r.project === project ? ' pb-on' : ''),
+        title: r.project,
+        onClick: () => { setProject(r.project); setProjListOpen(false); setSaveMsg(''); void rememberProject(r.project) },
+      }, projListOpen ? clip(r.name, 18) + ' · ' + r.project : clip(r.name, 18)))),
+    h('div', { className: 'pb-oneline' },
+      h('input', {
+        className: 'pb-input',
+        value: sentence,
+        disabled: planBusy,
+        placeholder: '用一句话描述要做什么，例如：给插件加一个把任务导出成 Markdown 的命令',
+        onChange: (e: { target: { value: string } }) => setSentence(e.target.value),
+        onKeyDown: (e: { key: string }) => { if (e.key === 'Enter' && !planBusy) void submitPlan() },
+      }),
+      h('button', { className: 'pb-btn pb-vio', disabled: planBusy || sentence.trim() === '', onClick: () => { void submitPlan() } }, planBusy ? '生成中…' : '生成导图'),
+      planBusy ? h('button', { className: 'pb-btn pb-no', onClick: cancelPlan }, '取消') : null),
+    planMsg !== '' ? h('div', { className: 'pb-planmsg' + (planMsgErr ? ' pb-err' : '') }, planMsg) : null,
     err !== '' ? h('div', { className: 'pb-banner pb-drift' }, '⚠ ' + err) : null,
     b == null ? h('div', { className: 'pb-body' },
       h('div', { className: 'pb-card' },
         h('div', { style: { fontWeight: 700, marginBottom: '4px' } }, project.trim() === '' ? '① 选一个最近打开的项目（或把项目根目录粘到上面的输入框）' : '⚠ 这个项目下还没有 .plan-board/'),
         h('div', { className: 'pb-hint' }, project.trim() === ''
-          ? '面板只读+直改规划；任务状态仍走 task_update（L3 证据门）。② 若项目还没有板子，让 Agent 跑 plan_edit init_board 起板。'
-          : '让 Agent 在 ' + project + ' 跑 plan_edit init_board 起板；或换成上面列出的其它项目。'),
+          ? '面板只读+直改规划；任务状态仍走 task_update（L3 证据门）。① 点上面一行里的项目标签切换；② 或直接在顶部输入框写一句话生成导图（服务端自动起板，结构变更先进待批队列，人可改可驳）。'
+          : '这个项目下还没有 .plan-board/。不碍事：在顶部输入框写一句话就能生成导图（服务端自动起板 + 进待批队列，人可改内容再确认）；也可以让 Agent 跑 plan_edit init_board 起板。'),
         recent.length > 0 ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '10px' } },
           recent.map(r => h('button', {
             key: r.project, className: 'pb-btn', title: r.project,
@@ -798,13 +1336,32 @@ function PaneWindow(): ReturnType<typeof h> {
         b.pendingApprovals.length > 0 ? h('div', { className: 'pb-banner pb-appr' },
           '⏳ ' + b.pendingApprovals.length + ' 个 plan_edit 待批',
           h('span', { style: { fontWeight: 400, opacity: .85 } }, b.pendingApprovals[0].reason.slice(0, 60))) : null,
-        b.pendingApprovals.map(ap => h('div', { className: 'pb-card', key: ap.id },
-          h('div', { style: { fontWeight: 700, marginBottom: '4px' } }, ap.id + ' · ' + ap.ops.length + ' ops · ' + ap.by),
-          h('div', { style: { opacity: .8, marginBottom: '6px' } }, ap.reason),
-          h('div', { style: { display: 'flex', gap: '8px' } },
-            h('button', { className: 'pb-btn pb-ok', onClick: () => { void post('/approve', { project, approvalId: ap.id, decision: 'approve' }).then(() => setNonce(n => n + 1)) } }, '确认生效'),
-            h('button', { className: 'pb-btn pb-no', onClick: () => { void post('/approve', { project, approvalId: ap.id, decision: 'reject' }).then(() => setNonce(n => n + 1)) } }, '驳回'),
-          ))),
+        b.pendingApprovals.map(ap => {
+          // 每条待批提案单独一份编辑态：原提案 vs 人改过的版本
+          const orig = normOps(ap.ops)
+          const ops = apEdits[ap.id] ?? orig
+          const extra: DepOption[] = []
+          for (const o of ops) if (o.op === 'add_node') extra.push({ id: o.node.id, title: o.node.title, type: o.node.type })
+          return h(ApprovalCard, {
+            key: ap.id,
+            ap,
+            ops,
+            origOps: orig,
+            dirty: opsChanged(orig, ops),
+            cycle: proposalCycle(b.nodes, ops),
+            issues: proposalParentIssues(b.nodes, ops),
+            options: mergeDepOptions(depOptions, extra),
+            busy: apBusy === ap.id,
+            rev: apRev,
+            onOps: (next: PbOp[]) => { setApEdits(prev => ({ ...prev, [ap.id]: next })) },
+            onReset: () => {
+              setApEdits(prev => { const n = { ...prev }; delete n[ap.id]; return n })
+              setApRev(r => r + 1)
+            },
+            onApprove: () => { void approveAp(ap) },
+            onReject: () => { void rejectAp(ap) },
+          })
+        }),
         h('div', { className: 'pb-sec' }, '任务思维导图 v' + b.version + ' · digest ' + (b.digest ?? '').slice(0, 10) + ' · 拖拽移动 / 点节点编辑 / 紫点拖出连依赖'),
         h(MindMap, { data: data as BoardData, effNodes, layout, dirtyIds, view, setView, dragRef, depLine, setDepLine, editorId, onNodePointerDown, onNodeMove, onNodeClick, onDepDrop, onHandlePointerDown, svgRef } as never),
         editorCard,

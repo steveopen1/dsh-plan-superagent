@@ -9,10 +9,12 @@
  * - **失败不循环**：工单不是成功结束时，任务落到 `blocked`（等人处置），不会自动重派。
  */
 import { setTimeout as delay } from 'node:timers/promises'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { BoardError, readyTasks, transitionOk, type Board, type BoardNode } from '../board/schema.js'
 import { PlanStore } from '../board/store.js'
 import { health, record, type ReceiveResult, type SourceContext, type Ticket } from './contract.js'
-import { BRIDGE_STORE_OPTS, PLANBOARD_HEALTH, PLANBOARD_KIND, type PlanboardConfig } from './source.js'
+import { BRIDGE_STORE_OPTS, PLANBOARD_HEALTH, PLANBOARD_KIND, defaultPlanboardProject, type PlanboardConfig } from './source.js'
 import { designFilePaths, planboardTrigger, readDesignSummary } from './trigger.js'
 
 /** 一个任务的一次派单尝试。 */
@@ -43,6 +45,8 @@ const MAX_SETTLED = 400
 export interface WatchOptions {
   /** 配置缺省时的轮询间隔（秒）。 */
   defaultPollSeconds?: number
+  /** The board registry's directory (where the panel records the projects it opened). */
+  stateDir?: string
 }
 
 /** 桥写板用的 actor 标记（写进事件流，审计可追）。 */
@@ -65,7 +69,7 @@ export async function watchPlanboard(ctx: SourceContext, signal: AbortSignal, op
       ctx.report(PLANBOARD_HEALTH, health('paused', 'sourceOff'))
     } else {
       try {
-        const result = await pollPlanboard(ctx, config, signal)
+        const result = await pollPlanboard(ctx, config, signal, options)
         failures = 0
         ctx.report(PLANBOARD_HEALTH, { state: 'ready', detail: describePoll(result), at: new Date().toISOString() })
       } catch (error) {
@@ -138,8 +142,35 @@ export interface PollResult {
 }
 
 /** 跑一轮：派单 + 收单。返回本轮统计（供健康条目展示）。 */
-export async function pollPlanboard(ctx: SourceContext, config: PlanboardConfig, signal: AbortSignal): Promise<PollResult> {
-  const store = PlanStore.open(config.project, BRIDGE_STORE_OPTS)
+/**
+ * The project the bridge works on: the source setting, else the project the panel opened last.
+ *
+ * The panel and the bridge must not disagree about which project they are on, so an empty
+ * setting means "follow the panel" — the panel records every project it opens in the board
+ * registry, and the most recent one is the one the person is looking at.
+ */
+export function resolveProject(config: PlanboardConfig, stateDir?: string): string {
+  if (config.project !== '') return config.project
+  if (stateDir == null || stateDir === '') return defaultPlanboardProject()
+  try {
+    const file = join(stateDir, 'projects.json')
+    if (!existsSync(file)) return defaultPlanboardProject()
+    const all = JSON.parse(readFileSync(file, 'utf8')) as Record<string, { name?: string; at?: string }>
+    let best = ''
+    let bestAt = ''
+    for (const [project, entry] of Object.entries(all)) {
+      const at = entry?.at ?? ''
+      if (project !== '' && at > bestAt) { best = project; bestAt = at }
+    }
+    return best !== '' ? best : defaultPlanboardProject()
+  } catch {
+    return defaultPlanboardProject()
+  }
+}
+
+export async function pollPlanboard(ctx: SourceContext, config: PlanboardConfig, signal: AbortSignal, options: WatchOptions = {}): Promise<PollResult> {
+  const project = resolveProject(config, options.stateDir)
+  const store = PlanStore.open(project, BRIDGE_STORE_OPTS)
   const board = store.board
   const dispatched = { ...(ctx.state.get(KV_DISPATCHED) ?? {}) }
   const settled = new Set(ctx.state.get(KV_SETTLED) ?? [])
