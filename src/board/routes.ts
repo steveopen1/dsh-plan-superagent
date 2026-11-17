@@ -152,6 +152,8 @@ export interface PlanHook {
 export interface ModeDeps {
   store: { get(sessionId: string): { mode: 'plan' | 'direct'; at: string } | undefined; set(sessionId: string, mode: 'plan' | 'direct'): { mode: 'plan' | 'direct'; at: string } }
   announce: (sessionId: string, mode: 'plan' | 'direct', project: string) => Promise<boolean>
+  /** The configured project, used when the panel has not opened one yet. */
+  project?: string
 }
 
 export function mountRoutes(
@@ -221,7 +223,7 @@ export function mountRoutes(
             const record = mode.store.set(sessionId, wanted)
             // Tell the Session: the agent reads this as its working instruction for the next turn.
             const latest = Object.entries(registry.projects()).sort((a, b) => (b[1].at ?? '').localeCompare(a[1].at ?? ''))[0]
-            const announced = await mode.announce(sessionId, wanted, latest?.[0] ?? '')
+            const announced = await mode.announce(sessionId, wanted, latest?.[0] ?? mode.project ?? '')
             sendJson(res, 200, { ok: true, sessionId, mode: record.mode, at: record.at, announced })
             return
           }

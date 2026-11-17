@@ -52,6 +52,8 @@ export interface ModeDeps {
         };
     };
     announce: (sessionId: string, mode: 'plan' | 'direct', project: string) => Promise<boolean>;
+    /** The configured project, used when the panel has not opened one yet. */
+    project?: string;
 }
 export declare function mountRoutes(webServer: {
     register(route: {

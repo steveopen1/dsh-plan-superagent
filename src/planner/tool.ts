@@ -8,6 +8,7 @@
  *
  * 人审门在 apply.ts：结构变更只进待批队列，板结构在人批准前不变。
  */
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -73,12 +74,37 @@ export function defaultStateDir(): string {
  * project 解析：必须是绝对路径；
  * 缺省顺序 = 工具参数 project → 宿主配置的 project → <stateDir>/default。
  */
+/**
+ * The project the panel last opened, from the board registry.
+ *
+ * The panel, the bridge and the planner must all work on the same project, so they read the
+ * same registry: the person picks it once, in the panel.
+ */
+export function latestProject(stateDir: string): string {
+  try {
+    const file = join(stateDir, 'projects.json')
+    if (!existsSync(file)) return ''
+    const all = JSON.parse(readFileSync(file, 'utf8')) as Record<string, { at?: string }>
+    let best = ''
+    let bestAt = ''
+    for (const [project, entry] of Object.entries(all)) {
+      const at = entry?.at ?? ''
+      if (project !== '' && at > bestAt) { best = project; bestAt = at }
+    }
+    return best
+  } catch {
+    return ''
+  }
+}
+
 export function resolveProject(p: unknown, stateDir: string, defaultProject = ''): string {
   if (typeof p === 'string' && p.trim() !== '') {
     if (!isAbsolutePath(p)) throw new PlannerError('BAD_PROJECT', 'project 必须是项目根目录绝对路径')
     return p
   }
   if (defaultProject !== '' && isAbsolutePath(defaultProject)) return defaultProject
+  const latest = latestProject(stateDir)
+  if (latest !== '') return latest
   return join(stateDir, 'default')
 }
 

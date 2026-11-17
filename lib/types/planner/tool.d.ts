@@ -27,6 +27,13 @@ export declare function defaultStateDir(): string;
  * project 解析：必须是绝对路径；
  * 缺省顺序 = 工具参数 project → 宿主配置的 project → <stateDir>/default。
  */
+/**
+ * The project the panel last opened, from the board registry.
+ *
+ * The panel, the bridge and the planner must all work on the same project, so they read the
+ * same registry: the person picks it once, in the panel.
+ */
+export declare function latestProject(stateDir: string): string;
 export declare function resolveProject(p: unknown, stateDir: string, defaultProject?: string): string;
 /** 从宿主配置服务里读配置（读不到就退化成空配置，不抛）。 */
 export declare function readHostConfig(ctx: unknown): PlannerHostConfig;
