@@ -41,6 +41,13 @@ interface DoingTask { project: string; id: string; title: string; scope: string[
 export interface GuardOpts {
   stateDir: string
   enforceScope: boolean
+  /**
+   * Whether the agent's session asked for the plan board to govern it (the mode switch).
+   *
+   * The board is a planning surface, not a sandbox: a session that never turned the plan-board
+   * mode on must keep working normally, so the guard only speaks to sessions that opted in.
+   */
+  isPlanMode?: (agentId: string | undefined) => boolean
   storeOpts: StoreOpts
   onEvent?: EventBroadcast
   log?: (msg: string) => void
@@ -67,6 +74,8 @@ export class ScopeGuard {
   decide(toolName: string, args: unknown, agentId: string | undefined): PreDecision | null {
     try {
       if (OWN_TOOLS.has(toolName)) return null // 本插件工具永放行（L2/L3 门自管）
+      // 只有开了计划板模式的会话才受板的约束：没开的会话照常写文件。
+      if (this.opts.isPlanMode?.(agentId) !== true) return null
       if (META_ALLOW.has(toolName)) return null // bash/run_code：放行，观测面已记录
       if (READ_ALWAYS.has(toolName)) return null
       if (READ_PREFIXES.some(p => toolName.startsWith(p))) return null

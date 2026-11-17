@@ -2,6 +2,13 @@ import { StoreOpts, EventBroadcast } from './store.js';
 export interface GuardOpts {
     stateDir: string;
     enforceScope: boolean;
+    /**
+     * Whether the agent's session asked for the plan board to govern it (the mode switch).
+     *
+     * The board is a planning surface, not a sandbox: a session that never turned the plan-board
+     * mode on must keep working normally, so the guard only speaks to sessions that opted in.
+     */
+    isPlanMode?: (agentId: string | undefined) => boolean;
     storeOpts: StoreOpts;
     onEvent?: EventBroadcast;
     log?: (msg: string) => void;

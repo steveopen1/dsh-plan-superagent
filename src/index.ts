@@ -139,6 +139,8 @@ export function apply(ctx: Context, config: Partial<Config> = {}): () => void {
         store: modeStore,
         announce: (sessionId, mode, project) => announceMode(ctx, sessionId, mode, project),
       },
+      // The board governs only the sessions that turned the plan-board mode on.
+      isPlanMode: (agentId) => (agentId == null ? false : modeStore.get(agentId)?.mode === 'plan'),
     })
     if (typeof disposeBoard === 'function') disposers.push(disposeBoard)
   } catch (error) {

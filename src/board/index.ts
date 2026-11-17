@@ -37,7 +37,7 @@ type HostCtx = Context & {
   logger?: { info(msg: string): void; warn(msg: string): void; error(msg: string): void }
 }
 
-export function apply(ctx: HostCtx, config: Partial<Config> = {}, deps: { plan?: import('./routes.js').PlanHook; mode?: import('./routes.js').ModeDeps } = {}): () => void {
+export function apply(ctx: HostCtx, config: Partial<Config> = {}, deps: { plan?: import('./routes.js').PlanHook; mode?: import('./routes.js').ModeDeps; isPlanMode?: (agentId: string | undefined) => boolean } = {}): () => void {
   const opts: StoreOpts = { blockOnDrift: config.blockOnDrift ?? true }
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const stateDir = config.stateDir !== undefined && config.stateDir !== '' ? config.stateDir : join(dshHome, 'dsh-plan-board')
@@ -58,6 +58,7 @@ export function apply(ctx: HostCtx, config: Partial<Config> = {}, deps: { plan?:
       storeOpts: opts,
       onEvent: registry.onEvent,
       log,
+      isPlanMode: deps.isPlanMode,
     })
     registry.guard = guard
     cleanups.push(mountRoutes(host.webServer as never, registry, deps.plan, deps.mode))
