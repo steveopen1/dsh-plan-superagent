@@ -1,5 +1,5 @@
 /**
- * dsh-plan-superagent client：右侧停靠面板（shell.overlay）+ 侧栏入口（header.utilities）。
+ * dsh-plan-superagent client：面板（宿主右侧栏的一个 tab）+ 会话头部入口 + 输入栏旁的模式开关。
  * 两必坑（骨架实测）：apply 用 ctx.slots 必须 export const inject = ['slots']；register 必带 name。
  * M2 第一批：/stream NDJSON 实时 + 主题跟随（采样 body 亮度）。
  * M2 第三批（本文件主体）：面板直编辑——点选节点出编辑卡（标题/备注/验收/scope/优先级/依赖多选）、
@@ -361,10 +361,24 @@ const STATUS_COLOR: Record<string, string> = {
   blocked: '#ef4444', done: '#10b981', canceled: '#6b7280',
 }
 
-let openState = false
-function togglePanel(): void {
-  openState = !openState
-  window.dispatchEvent(new CustomEvent('dsh-plan-superagent:toggle'))
+/**
+ * 宿主右侧栏里的 tab 类型：id 用来占插槽 key，kind 用来 openTab。
+ * 面板改住这里，而不是 shell.overlay —— 后者是 position:absolute;inset:0 的整屏浮层，
+ * 会直接盖住对话区（用户不接受 UI 挡住操作面）。
+ */
+const PANEL_TAB_ID = NS + ':panel'
+const PANEL_TAB_KIND = 'planboard'
+
+/**
+ * 宿主右侧栏服务（运行时注入；服务不在时面板就不出现，绝不拖垮插件）。
+ */
+let sidebarRight: { openTab?: (kind: string) => void } | null = null
+
+/** 打开面板 = 让宿主右侧栏开一个 PlanBoard tab。 */
+function openPanelTab(): void {
+  const svc = sidebarRight
+  if (svc == null || typeof svc.openTab !== 'function') return
+  svc.openTab(PANEL_TAB_KIND)
 }
 
 /** 主题跟随：采样 app body 实际背景亮度；异常时退回系统偏好。 */
@@ -381,9 +395,12 @@ function appDark(): boolean {
 }
 
 const CSS = [
+  // 面板住进宿主右侧栏的一个 tab：跟着容器走，自己不定位（shell.overlay 是 position:absolute 的浮层，
+  // 会盖住对话区 —— 用户不接受 UI 挡住操作面）
   '.pb-panel{--pb-bg:#f8fafc;--pb-ink:#0f172a;--pb-line:#e2e8f0;--pb-card:#ffffff;--pb-muted:#64748b;',
-  'position:fixed;top:0;right:0;bottom:0;width:min(560px,46vw);z-index:60;display:flex;flex-direction:column;',
-  'background:var(--pb-bg);color:var(--pb-ink);border-left:1px solid var(--pb-line);box-shadow:-8px 0 24px rgba(15,23,42,.10)}',
+  'position:relative;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;',
+  'background:var(--pb-bg);color:var(--pb-ink);border-left:1px solid var(--pb-line)}',
+  '.pb-panel[data-collapsed] .pb-body{display:none}',
   '.pb-panel[data-mode="dark"]{--pb-bg:#0f141c;--pb-ink:#e2e8f0;--pb-line:#1e293b;--pb-card:#151b26;--pb-muted:#7c8798}',
   '.pb-head{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--pb-line)}',
   '.pb-title{font-weight:700;font-size:13px;letter-spacing:.4px}',
@@ -474,15 +491,11 @@ const CSS = [
   '.pb-entry:hover .pb-orb{transform:rotate(-6deg)}',
   '.pb-entry:hover .pb-core{animation-duration:1.1s}',
   '.pb-entry:hover .pb-orbit{stroke-dasharray:4 3;animation:pb-dash .8s linear infinite}',
-  '.pb-entry .pb-lwrap{display:inline-block;overflow:hidden;max-width:0;margin-left:0;transition:max-width var(--pb-dur) var(--pb-ease),margin-left var(--pb-dur) var(--pb-ease)}',
-  '.pb-entry:hover .pb-lwrap,.pb-entry:focus-visible .pb-lwrap,.pb-entry.pb-on .pb-lwrap{max-width:var(--pb-lw,62px);margin-left:7px}',
-  '.pb-entry .pb-label{display:inline-block;white-space:nowrap;opacity:0;transform:translateX(-5px);transition:opacity .2s ease,transform .34s var(--pb-ease);',
-  'text-shadow:0 1px 6px rgba(6,8,20,.75),0 0 12px rgba(139,92,246,.35)}',
-  '.pb-entry:hover .pb-label,.pb-entry:focus-visible .pb-label,.pb-entry.pb-on .pb-label{opacity:1;transform:none;transition-delay:.07s}',
   // 状态点：灰=未设置/无板 · 青=干净 · 琥珀=有 doing · 红=漂移阻断
-  '.pb-entry .pb-dot{width:0;height:7px;margin-left:0;opacity:0;border-radius:50%;flex:none;background:#94a3b8;',
-  'transition:width var(--pb-dur) var(--pb-ease),margin-left var(--pb-dur) var(--pb-ease),background .25s,box-shadow .25s,opacity .3s}',
-  '.pb-entry:hover .pb-dot,.pb-entry:focus-visible .pb-dot,.pb-entry.pb-on .pb-dot{width:7px;margin-left:7px;opacity:1}',
+  // 状态点贴在按钮角上（绝对定位在按钮内部）：hover 时只改透明度，宽度永远不变 —— 不挤右邻
+  '.pb-entry .pb-dot{position:absolute;right:3px;bottom:3px;width:6px;height:6px;border-radius:50%;background:#94a3b8;',
+  'opacity:0;transition:opacity .25s,background .25s,box-shadow .25s}',
+  '.pb-entry:hover .pb-dot,.pb-entry:focus-visible .pb-dot,.pb-entry.pb-on .pb-dot{opacity:1}',
   '.pb-entry .pb-dot.pb-clean{background:#22d3ee;box-shadow:0 0 6px rgba(34,211,238,.65)}',
   '.pb-entry .pb-dot.pb-work{background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,.75);animation:pb-dot 2s ease-in-out infinite}',
   '.pb-entry .pb-dot.pb-block{background:#ef4444;box-shadow:0 0 9px rgba(239,68,68,.85);animation:pb-dot 1.1s ease-in-out infinite}',
@@ -493,7 +506,8 @@ const CSS = [
   // 弧度全程不动 —— 既没有「方角 → 胶囊」的跳变，也没有 999px 那种"超过半高即被 clamp、
   // 补间尾帧才突变"的问题（用户 2026-09-16 要求两态弧度统一）。
   // 悬停不再放大缩小（用户 2026-09-15 要求去掉）：避免与收起/展开的形变动效叠加。
-  '.pb-entry:hover,.pb-entry:focus-visible,.pb-entry.pb-on{padding:0 12px 0 10px;transform:translateY(-1.5px);filter:brightness(1.12);',
+  // 只提亮/上浮，不改 padding —— 改宽度会把右邻（「⋯ 更多操作」）挤走
+  '.pb-entry:hover,.pb-entry:focus-visible,.pb-entry.pb-on{transform:translateY(-1.5px);filter:brightness(1.12);',
   'box-shadow:0 0 0 1px rgba(168,85,247,.45),0 6px 26px rgba(124,58,237,.55),0 0 26px rgba(56,189,248,.40),0 0 30px rgba(232,121,249,.32),inset 0 0 18px rgba(124,58,237,.45)}',
   '.pb-entry:active{transform:translateY(0);transition-duration:.06s;',
   'box-shadow:0 1px 6px rgba(99,102,241,.4),inset 0 1px 0 rgba(255,255,255,.12)}',
@@ -510,13 +524,16 @@ const CSS = [
   '[data-mode="dark"] .pb-tag.pb-on{color:#a78bfa}',
   '.pb-tag:hover{filter:brightness(1.08)}',
   // 模式开关挂在宿主输入栏里（不在面板内），所以样式自带颜色：紫色主题 + color:inherit 跟随宿主文字色
-  '.pb-modewrap{display:inline-flex;align-items:center;gap:6px;max-width:100%}',
-  '.pb-modebtn{cursor:pointer;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap;',
-  'border:1px solid rgba(139,92,246,.55);background:rgba(139,92,246,.12);color:inherit}',
-  '.pb-modebtn:hover{filter:brightness(1.08)}',
-  '.pb-modebtn.pb-on{background:#8b5cf6;border-color:#8b5cf6;color:#fff;box-shadow:0 0 0 1px rgba(139,92,246,.35),0 2px 10px rgba(124,58,237,.35)}',
-  '.pb-modebtn:disabled{opacity:.5;cursor:not-allowed}',
-  '.pb-modeerr{font-size:11px;color:#ef4444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}',
+  // 模式开关：纯图标 20×20，不占文字宽度；状态用颜色表达（灰=直改，紫=计划板）。
+  // 不定位、不展开 —— 输入区一个像素都不动。
+  '.pb-modewrap{display:inline-flex;align-items:center;flex:0 0 auto;gap:0}',
+  '.pb-modebtn{cursor:pointer;width:20px;height:20px;min-width:20px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;',
+  'padding:0;border-radius:999px;border:1px solid transparent;background:transparent;color:inherit;opacity:.7}',
+  '.pb-modebtn:hover{opacity:1;background:rgba(139,92,246,.14)}',
+  '.pb-modebtn:focus-visible{outline:2px solid rgba(139,92,246,.7);outline-offset:1px}',
+  '.pb-modebtn.pb-on{background:#8b5cf6;border-color:#8b5cf6;color:#fff;opacity:1;box-shadow:0 0 0 1px rgba(139,92,246,.3)}',
+  '.pb-modebtn.pb-err{border-color:#ef4444}',
+  '.pb-modebtn:disabled{opacity:.35;cursor:not-allowed}',
   '.pb-ops{border:1px dashed var(--pb-line);border-radius:8px;padding:6px;margin:6px 0;display:flex;flex-direction:column;gap:6px;background:rgba(100,116,139,.05)}',
   '.pb-oprow{border:1px solid var(--pb-line);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:5px;background:var(--pb-card)}',
   '.pb-ophead{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--pb-muted)}',
@@ -556,23 +573,9 @@ async function post(path: string, body: Record<string, unknown>): Promise<Record
  */
 function PaneSidebarButton(): ReturnType<typeof h> {
   ensureStyles()
-  const [on, setOn] = useState(openState)
   const [mode, setMode] = useState(appDark() ? 'dark' : 'light')
   const [stat, setStat] = useState<{ kind: 'none' | 'clean' | 'work' | 'block'; tip: string }>({ kind: 'none', tip: '未设置项目路径' })
   const btnRef = useRef<HTMLButtonElement | null>(null)
-  // 收起/展开靠 max-width 过渡：量一次真实文字宽写进 --pb-lw，让补间全程都在动（不用猜测值）。
-  useEffect(() => {
-    const btn = btnRef.current
-    const label = btn?.querySelector('.pb-label') as HTMLElement | null
-    if (btn == null || label == null) return
-    const w = label.offsetWidth
-    if (w > 0) btn.style.setProperty('--pb-lw', w + 'px')
-  }, [])
-  useEffect(() => {
-    const f = (): void => setOn(openState)
-    window.addEventListener('dsh-plan-superagent:toggle', f)
-    return () => window.removeEventListener('dsh-plan-superagent:toggle', f)
-  }, [])
   useEffect(() => {
     let stop = false
     const tick = async (): Promise<void> => {
@@ -619,19 +622,17 @@ function PaneSidebarButton(): ReturnType<typeof h> {
       h('circle', { key: 'core', className: 'pb-core', cx: 9, cy: 9, r: 2.6, fill: 'url(#pb-orb-core)' })))
   const dotCls = 'pb-dot ' + (stat.kind === 'clean' ? 'pb-clean' : stat.kind === 'work' ? 'pb-work' : stat.kind === 'block' ? 'pb-block' : 'pb-none')
   return h('button', {
-    className: 'pb-entry' + (on ? ' pb-on' : ''),
+    className: 'pb-entry',
     'data-mode': mode,
     'data-stat': stat.kind,
     ref: btnRef,
-    onClick: togglePanel,
-    'aria-pressed': on,
-    title: 'dsh-plan-superagent 规划面板 · ' + stat.tip,
+    onClick: openPanelTab,
+    title: 'dsh-plan-superagent 规划面板（右侧栏）· ' + stat.tip,
     'aria-label': 'dsh-plan-superagent 规划面板，' + stat.tip,
   },
     h('span', { className: 'pb-aurora', key: 'aurora', 'aria-hidden': 'true' }),
     h('span', { className: 'pb-ring', key: 'ring', 'aria-hidden': 'true' }),
     orb,
-    h('span', { className: 'pb-lwrap', key: 'lwrap' }, h('span', { className: 'pb-label', key: 'label' }, 'PlanBoard')),
     h('span', { className: dotCls, key: 'dot' }),
     h('span', { className: 'pb-shine', key: 'shine', 'aria-hidden': 'true' }))
 }
@@ -983,20 +984,29 @@ function PlanBoardModeChip(props: { sessionId?: string }): ReturnType<typeof h> 
       if (m != null) setMode(m)
     } catch (e) { setErr(String(e)) } finally { setBusy(false) }
   }
+  // 纯图标按钮：文字全在 title 里（输入区不因为它多出任何宽度）
+  const tip = sid == null
+    ? '计划板模式：拿不到会话 id，开关不可用'
+    : mode === 'plan'
+      ? '计划板模式：开 —— 开发类需求先出计划树再动手（点击关掉）'
+      : '计划板模式：关 —— 点击开启：开发类需求先出计划树再动手'
   return h('span', { className: 'pb-modewrap' },
     h('button', {
-      className: 'pb-modebtn' + (mode === 'plan' ? ' pb-on' : ''),
+      className: 'pb-modebtn' + (mode === 'plan' ? ' pb-on' : '') + (err !== '' ? ' pb-err' : ''),
       disabled: busy || sid == null,
       'aria-pressed': mode === 'plan',
-      title: sid == null
-        ? '拿不到会话 id，模式开关不可用'
-        : mode === 'plan' ? '计划板模式已开：开发类需求先走计划板（点一下关掉）' : '当前直改：开发类需求直接动手（点一下让需求先走计划板）',
-      onClick: () => { void toggle() },
-    }, modeLabel(mode)),
-    err !== '' ? h('span', { className: 'pb-modeerr', role: 'status', title: err }, clip(err, 36)) : null)
+      'aria-label': modeLabel(mode),
+      title: err !== '' ? modeLabel(mode) + '｜' + err : tip,
+      onClick: (e: { currentTarget: { blur: () => void } }) => {
+        e.currentTarget.blur() // 点完就把焦点还给输入框，别抢
+        void toggle()
+      },
+    }, h('svg', { viewBox: '0 0 16 16', width: 13, height: 13, 'aria-hidden': 'true' },
+      h('rect', { x: 2.2, y: 2.6, width: 11.6, height: 10.8, rx: 2.4, fill: 'none', stroke: 'currentColor', strokeWidth: 1.4 }),
+      h('path', { d: 'M4.8 6.3h6.4M4.8 9.2h4.2', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round' }))))
 }
 function PaneWindow(): ReturnType<typeof h> | null {
-  const [open, setOpen] = useState(openState)
+  const [collapsed, setCollapsed] = useState(false)
   const [project, setProject] = useState(loadProject())
   const [data, setData] = useState<BoardData | null>(null)
   const [err, setErr] = useState('')
@@ -1022,11 +1032,6 @@ function PaneWindow(): ReturnType<typeof h> | null {
   const dragRef = useRef<{ kind: 'node'; id: string; sx: number; sy: number; bx: number; by: number; moved: boolean } | { kind: 'dep'; from: string } | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const editorRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    const f = (): void => setOpen(openState)
-    window.addEventListener('dsh-plan-superagent:toggle', f)
-    return () => window.removeEventListener('dsh-plan-superagent:toggle', f)
-  }, [])
   useEffect(() => {
     const t = setInterval(() => { const d = appDark(); setMode(prev => (prev === (d ? 'dark' : 'light') ? prev : (d ? 'dark' : 'light'))) }, 2000)
     return () => clearInterval(t)
@@ -1139,7 +1144,6 @@ function PaneWindow(): ReturnType<typeof h> | null {
     if (el == null) return
     if (el.getBoundingClientRect().top > window.innerHeight - 40) el.scrollIntoView({ block: 'nearest' })
   }, [editorId])
-  if (!open) return null
   const dirtyCount = dirtyIds.size;
   const toSvg = (clientX: number, clientY: number): { x: number; y: number } => {
     const rect = svgRef.current?.getBoundingClientRect()
@@ -1309,11 +1313,11 @@ function PaneWindow(): ReturnType<typeof h> | null {
       h('span', { className: 'pb-hint', style: { alignSelf: 'center' } }, editor.type === 'task' ? '状态流转与证据走 task_update（L3 证据门），不在面板直改' : '模块删除需先清空子任务')))
   }
   const editorCard = editor != null ? h('div', { className: 'pb-card pb-form', key: 'editor', ref: editorRef }, editorChildren) : null
-  return h('div', { className: 'pb-panel', 'data-mode': mode },
+  return h('div', { className: 'pb-panel', 'data-mode': mode, 'data-collapsed': collapsed ? 'true' : undefined },
     h('div', { className: 'pb-head' },
       h('span', { className: 'pb-title' }, '🗺 PlanBoard'),
       h('input', { className: 'pb-input', value: project, placeholder: '项目根目录绝对路径，如 /path/to/your/project 或 C:\\path\\to\\project', onChange: (e: { target: { value: string } }) => setProject(e.target.value), onBlur: () => { void rememberProject(project) } }),
-      h('button', { className: 'pb-btn', onClick: togglePanel }, '收起'),
+      h('button', { className: 'pb-btn', onClick: () => setCollapsed(v => !v) }, collapsed ? '展开' : '收起'),
     ),
     // ===== 顶部常驻区：项目切换 + 一句话生成（不用切到聊天框） =====
     h('div', { className: 'pb-projrow' },
@@ -1410,27 +1414,54 @@ function PaneWindow(): ReturnType<typeof h> | null {
   )
 }
 
+interface SidebarRightLike {
+  openTab?: (kind: string) => void
+}
+interface SidebarRightTabsLike {
+  register(def: { id: string; kind: string; priority?: string; title: () => string }): unknown
+}
 type SlotsCtx = {
   slots: {
     inject(slot: string, register: () => unknown): void
     register(meta: Record<string, unknown>, component?: unknown): unknown
   }
   effect(fn: () => unknown, label?: string): void
+  /** 运行时注入宿主服务：服务没到位就不回调，插件照常加载。 */
+  inject(services: string[], fn: (scope: {
+    slots: SlotsCtx['slots']
+    effect(fn: () => unknown, label?: string): void
+    sidebarRight?: SidebarRightLike
+    sidebarRightTabs?: SidebarRightTabsLike
+  }) => void): void
 }
 
 export const inject = ['slots']
 
 export function apply(ctx: SlotsCtx): void {
+  // 面板住进宿主右侧栏的一个 tab：宿主自己排版，不盖对话区。
+  // 运行时注入这两个服务 —— 宿主没有右侧栏时这一段不执行，插件照常加载。
+  ctx.inject(['slots', 'sidebarRight', 'sidebarRightTabs'], (scope) => {
+    scope.effect(() => scope.sidebarRightTabs?.register({
+      id: PANEL_TAB_ID,
+      kind: PANEL_TAB_KIND,
+      priority: 'builtin',
+      title: () => 'PlanBoard',
+    }), NS + ':tabtype')
+    scope.effect(() => scope.slots.inject('sidebar.right.pane.tab', () => scope.slots.register({
+      name: 'sidebar.right.pane.tab',
+      key: PANEL_TAB_ID,
+    }, PaneWindow as unknown as (props: never) => unknown)), NS + ':tab')
+    sidebarRight = scope.sidebarRight ?? null
+  })
   ctx.effect(() => {
-    ctx.slots.inject('shell.overlay', () =>
-      ctx.slots.register({ name: 'shell.overlay', id: NS + ':pane', order: 85 }, PaneWindow as unknown as (props: never) => unknown))
     // 计划板模式开关：挂原生输入栏左侧（与权限/计划芯片同一排）。
     // list 型插槽按 id 去重，id 必须全宿主唯一 —— 用 NS 前缀，且不能与旧插件同名。
     // inject 收到的第一个实参就是会话 id（宿主 slots 的 runInject 把 scope 绑定 key 传进来）。
     ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
       name: 'conversation.input.left',
       id: NS + ':mode',
-      order: -1,
+      // order 排在宿主自带控件之后（模型/权限那排），别把人家挤走
+      order: 0.5,
       inject: (sessionId: string) => ({ sessionId }),
     }, PlanBoardModeChip as unknown as (props: never) => unknown))
     ctx.slots.inject('conversation.session.header.utilities', () =>
