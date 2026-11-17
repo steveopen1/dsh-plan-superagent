@@ -1,0 +1,4 @@
+# dsh-plan-superagent bundle assembly list.
+- insert:
+    - id: dsh-plan-superagent
+      name: 'dsh-plan-superagent'
