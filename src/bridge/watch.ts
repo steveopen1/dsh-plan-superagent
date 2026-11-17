@@ -281,11 +281,16 @@ function settleFinished(ctx: SourceContext, config: PlanboardConfig, dispatched:
     if (entry.ticketId == null || settled.has(entry.ticketId)) continue
     let ticket: Ticket | undefined
     try { ticket = ctx.tickets.get(entry.ticketId) } catch { continue }
-    if (ticket == null || ticket.ended == null) continue
+    if (ticket == null) continue
+    const report = ticket.assignments.at(-1)?.report
+    // A failed worker leaves the ticket without `ended` (a person may retry it), so the attempt is
+    // over as soon as the last report says `failed`.
+    const failed = report?.state === 'failed'
+    if (ticket.ended == null && !failed) continue
     const evidence = evidenceOf(ticket)
     const now = new Date().toISOString()
     // 这一轮尝试已经结束（工单终结）：记下时刻，人重新启用任务即可重开一轮。
-    if (entry.endedAt == null) entry.endedAt = ticket.ended?.at ?? now
+    if (entry.endedAt == null) entry.endedAt = ticket.ended?.at ?? report?.at ?? now
     if (settled.has(entry.ticketId)) continue
     try {
       writeBack(config.project, taskId, ticket, evidence, now)
