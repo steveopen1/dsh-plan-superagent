@@ -253,9 +253,11 @@ function refreshTicketIds(ctx: SourceContext, dispatched: Record<string, Dispatc
     if (entry == null || entry.triggerId !== ticket.origin.triggerId) continue
     if (entry.ticketId !== ticket.id) entry.ticketId = ticket.id
   }
-  // A ticket that already ended (failed fast, stopped, merged) is no longer in tickets.open(),
-  // so look it up through the thread's subscriptions — otherwise its result would never be
-  // written back and the task would stay `doing` forever.
+  // Find our ticket through the thread's subscriptions, not through tickets.open():
+  //   - a ticket that already ended (failed fast, stopped, merged) is no longer open, and
+  //   - the engine may attach a new attempt to the ticket it already has instead of opening
+  //     a second one, so the ticket's origin trigger is the previous attempt's.
+  // Only this task's tickets sit on this thread, so a subscription is enough to identify ours.
   for (const entry of Object.values(dispatched)) {
     if (entry.ticketId != null || entry.threadKey == null) continue
     let thread: { subscriptions?: string[] } | undefined
@@ -263,7 +265,7 @@ function refreshTicketIds(ctx: SourceContext, dispatched: Record<string, Dispatc
     for (const id of thread?.subscriptions ?? []) {
       let ticket: Ticket | undefined
       try { ticket = ctx.tickets.get(id) } catch { ticket = undefined }
-      if (ticket?.origin?.triggerId !== entry.triggerId) continue
+      if (ticket == null) continue
       entry.ticketId = id
       break
     }
