@@ -271,15 +271,30 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
   let lastProblem = ''
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const user = buildUserPrompt({ sentence, context: opts.context, feedback, includeDesigns: false })
-    const text = await callModel(opts.ctx, {
-      system: PLAN_SYSTEM_PROMPT,
-      user,
-      signal: opts.signal,
-      timeoutMs: Math.max(1_000, Math.min(deadline - Date.now(), TREE_TIMEOUT_CAP)),
-      maxTokens,
-      provider: opts.provider,
-      model: opts.model,
-    })
+    let text: string
+    try {
+      text = await callModel(opts.ctx, {
+        system: PLAN_SYSTEM_PROMPT,
+        user,
+        signal: opts.signal,
+        timeoutMs: Math.max(1_000, Math.min(deadline - Date.now(), TREE_TIMEOUT_CAP)),
+        maxTokens,
+        provider: opts.provider,
+        model: opts.model,
+      })
+    } catch (e) {
+      // 流断了/超时了也重试：这类故障是随机的（provider 侧超时会随负载起伏），
+      // 一次断流不该让整次规划失败。但配置类错误（没有模型、宿主没有 llm）与
+      // 调用方取消都不重试——重试只会把同一个错再撞一遍。
+      const code = e instanceof PlannerError ? e.code : 'MODEL_ERROR'
+      if (code === 'NO_MODEL' || code === 'NO_LLM' || code === 'ABORTED') throw e
+      lastProblem = '第 ' + String(attempt) + ' 次调用模型失败（' + code + '）：' + (e instanceof Error ? e.message : String(e))
+      feedback = [
+        lastProblem,
+        '请重试一次，并把输出尽量精简（模块 2~3 个、每个模块 1~3 个任务）。',
+      ].join('\n')
+      continue
+    }
 
     let raw: unknown
     try {
@@ -412,3 +427,4 @@ export function derivedDesign(task: { title: string; acceptance: string[]; scope
     tests: acceptance.slice(),
   }
 }
+

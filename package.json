@@ -45,7 +45,7 @@
     "@deepseek-ai/schemastery": "^3.18.0"
   },
   "dependencies": {
-    "dsh-superagent": "github:steveopen1/dsh-superagent#441d7f15a2cae720b1ebee2266ce3246a770adbf",
+    "dsh-superagent": "github:steveopen1/dsh-superagent#1182d898c7b45041ffafbc41d5776f6cff5a706b",
     "zod": "^4.4.3"
   },
   "scripts": {

@@ -162,4 +162,39 @@ async function run(schema, prompt, gen) {
   const quick = await gen.generatePlan({ ctx: fakeModel(noDesignCalls), sentence: 'x', designs: false })
   ok('⑤ designs:false 只调一次模型（树）', noDesignCalls.length === 1, noDesignCalls.length)
   ok('⑤ designs:false 仍有导图（推导的）', quick.modules.flatMap((m) => m.tasks).every((t) => t.design != null))
+
+  // ===== ⑥ 树阶段的流断了会重试（抗断流） =====
+  let treeCalls = 0
+  const flakyCtx = {
+    get(key) {
+      if (key === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      if (key === 'llm') {
+        return {
+          prepareCall: async () => ({
+            config: {},
+            stream: async function* (payload) {
+              const user = payload.messages[0].content[0].text
+              if (user.includes('字段固定五个')) {
+                yield { type: 'text-delta', text: JSON.stringify(DESIGN_RAW) }
+                yield { type: 'finish', reason: { kind: 'stop' } }
+                return
+              }
+              treeCalls += 1
+              if (treeCalls === 1) {
+                yield { type: 'finish', reason: { kind: 'error', failure: { message: 'stream broke' } } }
+                return
+              }
+              yield { type: 'text-delta', text: JSON.stringify(treeRaw()) }
+              yield { type: 'finish', reason: { kind: 'stop' } }
+            },
+          }),
+        }
+      }
+      return undefined
+    },
+  }
+  const retried = await gen.generatePlan({ ctx: flakyCtx, sentence: 'x' })
+  ok('⑥ 树阶段的流断了会重试', treeCalls === 2, treeCalls)
+  ok('⑥ 重试后仍拿到完整计划', retried.modules.flatMap((m) => m.tasks).every((t) => t.design != null))
 }
+
