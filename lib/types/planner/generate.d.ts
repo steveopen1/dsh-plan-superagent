@@ -56,7 +56,7 @@ export declare function collectRepoContext(project: string): string;
 /**
  * 生成计划：先出树（模型 → 严格解析 → schema 校验 → 语义校验 → 回灌错误重试），
  * 再逐任务补子导图（单张失败只降级），最后过一遍最终 schema。
- * 全部失败时抛 PlannerError（code=MODEL_OUTPUT_INVALID），不返回半成品。
+ * 树失败不降级：抛 PlannerError（code=MODEL_OUTPUT_INVALID），且报错要人能行动。
  */
 export declare function generatePlan(opts: GenerateOptions): Promise<Plan>;
 /**

@@ -21,6 +21,14 @@ function isSafeTaskId(taskId: string): boolean {
   return /^[A-Za-z0-9_-]{1,64}$/.test(taskId)
 }
 
+/** 解包子导图：规划器写的是包起来的形状，面板要裸的五字段；裸的就原样返回。 */
+function unwrapDesign(parsed: unknown): unknown {
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) return parsed
+  const inner = (parsed as { design?: unknown }).design
+  if (inner != null && typeof inner === 'object' && !Array.isArray(inner)) return inner
+  return parsed
+}
+
 /** 子导图文件相对项目根的路径（板上用正斜杠写指针，跨平台一致）。 */
 function designRelative(designDir: string, taskId: string): string {
   return designDir.replace(/\\/g, '/') + '/' + taskId + '.json'
@@ -222,8 +230,11 @@ export function mountRoutes(
             const file = join(project, designDir, taskId + '.json')
             let design: unknown = null
             if (existsSync(file)) {
-              try { design = JSON.parse(readFileSync(file, 'utf8')) }
+              let parsed: unknown
+              try { parsed = JSON.parse(readFileSync(file, 'utf8')) }
               catch { sendErr(res, 400, 'BAD_DESIGN', '子导图文件不是合法 JSON'); return }
+              // 规划器写的是包起来的形状（{taskId, …, design:{…}}），面板要的是裸的五字段；读时解包。
+              design = unwrapDesign(parsed)
             }
             sendJson(res, 200, { ok: true, taskId, design, relative: designRelative(designDir, taskId), path: file })
             return
@@ -269,7 +280,8 @@ export function mountRoutes(
             const dir = join(designProject, designDir)
             mkdirSync(dir, { recursive: true })
             const file = join(dir, taskId + '.json')
-            writeFileSync(file, JSON.stringify(design, null, 2))
+            // 写盘用与规划器同构的形状（包一层），读时再解包 —— 盘上只有一种格式。
+            writeFileSync(file, JSON.stringify({ taskId, generatedAt: new Date().toISOString(), design }, null, 2))
             // 给任务补上子导图指针，面板才知道这个任务有导图（● 指示器）。
             try {
               const store = PlanStore.open(designProject, registry.opts, registry.onEvent)

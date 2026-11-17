@@ -3,12 +3,15 @@
  *
  * 为什么拆两段：一次输出「整棵树 + 每张子导图」的 JSON 太大，模型的流会断
  * （实测：宿主默认的 Anthropic 兼容流 "stream ended without a stop reason"；
- *  另一轮是内部 90s 超时直接 abort）。于是拆开：
+ *  另一轮是上游 90s abort）。于是拆开：
  *   - 第一段（树）：只出 plan → modules → tasks（title/acceptance/scope/deps/priority）；
  *   - 第二段（子导图）：**逐个任务**单独一次调用，只出那一张的 design（输出小，流不容易断）。
  *
- * 降级纪律：某一张导图画不出来只降级（按该任务已有的验收标准与范围推导一份，并写明「自动推导」），
- * **不让整棵计划作废**——一张导图画不出来，不等于计划不对。
+ * 降级纪律：**子导图**降级（按该任务已有的验收标准与范围推导一份，并写明「自动推导」），
+ * **树不降级**——宁可明确失败，也不要编一棵计划树出来（本仓原则：绝不编数据冒充模型结果）。
+ *
+ * 重试纪律：超时 / 响应流中断 / 上游报错都**可重试**（这类故障常常是瞬时的：模型慢、网络抖）；
+ * 重试只能用**剩余预算**里的钱，绝不超支；预算烧完就停，给一句人看得懂、能动手的报错。
  *
  * 预算纪律：timeoutMs 是**整段的总预算**（树 + 全部子导图共用）。
  * 树是主产出，先给它（上限 TREE_TIMEOUT_CAP）；子导图吃剩下的，
@@ -25,6 +28,8 @@ import {
 
 /** 树阶段单次调用上限：树是主产出，值得多等一会儿。 */
 const TREE_TIMEOUT_CAP = 180_000
+/** 树阶段重试的最小剩余预算：连这点时间都不够就别再试了，直接给可行动的报错。 */
+const TREE_MIN_BUDGET = 5_000
 /** 单张子导图的调用上限。 */
 const DESIGN_TIMEOUT_CAP = 120_000
 /** 剩余预算低于这个值就不再调模型，直接推导。 */
@@ -256,7 +261,7 @@ export function collectRepoContext(project: string): string {
 /**
  * 生成计划：先出树（模型 → 严格解析 → schema 校验 → 语义校验 → 回灌错误重试），
  * 再逐任务补子导图（单张失败只降级），最后过一遍最终 schema。
- * 全部失败时抛 PlannerError（code=MODEL_OUTPUT_INVALID），不返回半成品。
+ * 树失败不降级：抛 PlannerError（code=MODEL_OUTPUT_INVALID），且报错要人能行动。
  */
 export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
   const sentence = String(opts.sentence ?? '').trim()
@@ -269,7 +274,17 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
 
   let feedback = ''
   let lastProblem = ''
+  // lastReason：最后一次失败的**中文分类**（超时 / 响应流中断 / JSON 不合法 / 结构不合规 …），
+  // 给最终报错用——人要看的是「哪一类问题」，不是上游那句天书。
+  let lastReason = '模型调用失败'
+  let attemptsMade = 0
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const remaining = deadline - Date.now()
+    if (remaining < TREE_MIN_BUDGET) {
+      // 预算烧完了：不再开新的一次调用（开下去就是超支 = 超时），直接给可行动的报错。
+      break
+    }
+    attemptsMade += 1
     const user = buildUserPrompt({ sentence, context: opts.context, feedback, includeDesigns: false })
     let text: string
     try {
@@ -277,18 +292,21 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
         system: PLAN_SYSTEM_PROMPT,
         user,
         signal: opts.signal,
-        timeoutMs: Math.max(1_000, Math.min(deadline - Date.now(), TREE_TIMEOUT_CAP)),
+        // 这一次只能用剩下的钱：树先拿大头（上限 180s），重试只吃剩余预算，绝不超支。
+        timeoutMs: Math.max(1_000, Math.min(remaining, TREE_TIMEOUT_CAP)),
         maxTokens,
         provider: opts.provider,
         model: opts.model,
       })
     } catch (e) {
-      // 流断了/超时了也重试：这类故障是随机的（provider 侧超时会随负载起伏），
-      // 一次断流不该让整次规划失败。但配置类错误（没有模型、宿主没有 llm）与
-      // 调用方取消都不重试——重试只会把同一个错再撞一遍。
+      // 配置类错误（没有模型、宿主没有 llm）与调用方取消不重试：重试只会再撞一遍同一个错。
       const code = e instanceof PlannerError ? e.code : 'MODEL_ERROR'
-      if (code === 'NO_MODEL' || code === 'NO_LLM' || code === 'ABORTED') throw e
-      lastProblem = '第 ' + String(attempt) + ' 次调用模型失败（' + code + '）：' + (e instanceof Error ? e.message : String(e))
+      if (code === 'NO_MODEL' || code === 'NO_LLM' || code === 'CANCELLED') throw e
+      // 超时 / 响应流中断 / 上游报错都重试：这类故障常常是**瞬时**的（模型慢、网络抖），
+      // 再试一次常常就过了——这正是两次真实失败（90s abort、流无 stop reason）暴露的缺口。
+      lastReason = treeFailureReason(code)
+      // 只留中文分类，不留上游原话（例如 "This operation was aborted"）：那是天书，甩给人没用。
+      lastProblem = '第 ' + String(attempt) + ' 次调用模型失败（' + lastReason + '）'
       feedback = [
         lastProblem,
         '请重试一次，并把输出尽量精简（模块 2~3 个、每个模块 1~3 个任务）。',
@@ -300,6 +318,7 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
     try {
       raw = parseStrictJson(text)
     } catch (e) {
+      lastReason = 'JSON 不合法'
       lastProblem = '第 ' + String(attempt) + ' 次输出不是合法 JSON：' + (e instanceof Error ? e.message : String(e))
       feedback = [
         lastProblem,
@@ -311,6 +330,7 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
     const parsed = RawPlanSchema.safeParse(raw)
     if (!parsed.success) {
       const issues = formatIssues(parsed.error)
+      lastReason = '结构不合规'
       lastProblem = '第 ' + String(attempt) + ' 次输出不符合结构要求：\n- ' + issues.join('\n- ')
       feedback = [
         lastProblem,
@@ -321,6 +341,7 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
 
     const built = buildPlan(parsed.data)
     if (built.errors.length > 0) {
+      lastReason = '依赖关系不对'
       lastProblem = '第 ' + String(attempt) + ' 次输出的依赖关系有问题：\n- ' + built.errors.join('\n- ')
       feedback = [
         lastProblem,
@@ -333,10 +354,33 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
     return await withDesigns(built.plan, opts, deadline)
   }
 
-  throw new PlannerError(
-    'MODEL_OUTPUT_INVALID',
-    '模型在 ' + String(maxAttempts) + ' 次尝试内都没给出合法计划。最后一次问题：\n' + lastProblem,
-  )
+  // 树**不降级**：宁可明确失败，也不要编一棵计划树出来（本仓原则：绝不编数据冒充模型结果）。
+  throw treeFailure(totalBudget, attemptsMade, lastReason, lastProblem)
+}
+
+/** 树阶段失败的中文分类（最终报错用；不把上游原话甩给人）。 */
+function treeFailureReason(code: string): string {
+  if (code === 'MODEL_TIMEOUT') return '超时'
+  if (code === 'ABORTED') return '响应流中断'
+  if (code === 'MODEL_ERROR') return '模型调用失败'
+  if (code === 'BAD_JSON') return 'JSON 不合法'
+  if (code === 'EMPTY_OUTPUT') return '模型没有返回内容'
+  return '模型调用失败'
+}
+
+/**
+ * 树阶段的最终报错：要人看得懂、能动手。
+ *
+ * 带实际尝试次数与最后一次失败原因（超时 / 响应流中断 / JSON 不合法 / 结构不合规），
+ * 再给三条下一步；不甩 "This operation was aborted" 这种天书。
+ */
+function treeFailure(seconds: number, attempts: number, reason: string, detail: string): PlannerError {
+  const lines = [
+    '模型在 ' + String(Math.round(seconds / 1000)) + ' 秒内没有给出计划树（尝试 ' + String(attempts) + ' 次，最后一次：' + reason + '）。',
+    '可以：① 再点一次生成（预算会重置）；② 把需求拆小一点再试；③ 在设置里换一个更快的模型。',
+  ]
+  if (detail !== '') lines.push('最后一次的详细问题：' + detail)
+  return new PlannerError('MODEL_OUTPUT_INVALID', lines.join('\n'))
 }
 
 /**
@@ -405,6 +449,8 @@ async function oneDesign(
       if (parsed.success) return parsed.data
       feedback = '上一次输出的子导图不符合要求：\n- ' + formatIssues(parsed.error).join('\n- ')
     } catch (e) {
+      // 调用方取消要往外抛：取消不是「这张导图画不出来」，别拿降级糊弄过去。
+      if (e instanceof PlannerError && e.code === 'CANCELLED') throw e
       feedback = '上一次调用失败：' + (e instanceof Error ? e.message : String(e))
     }
   }
@@ -427,4 +473,3 @@ export function derivedDesign(task: { title: string; acceptance: string[]; scope
     tests: acceptance.slice(),
   }
 }
-

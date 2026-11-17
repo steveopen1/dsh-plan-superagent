@@ -13,6 +13,13 @@
  * 超时为什么不能只靠 abort：provider 未必理会 abort signal —— 光发信号不等于这次调用会结束，
  * 流可能一直挂着（实测 Anthropic 兼容流会这样）。所以超时/取消必须**主动打断等待**：
  * 把「prepareCall + 读流」放进一个 promise，用 race 兜住它。
+ *
+ * 错误码分工（generate.ts 靠它决定「重试还是放弃」）：
+ *   - MODEL_TIMEOUT：本次调用超时（可重试，瞬时故障常见）；
+ *   - ABORTED：上游把流中止了（可重试；上游原话常见 "This operation was aborted"）；
+ *   - MODEL_ERROR：上游报错（可重试）；
+ *   - CANCELLED：调用方取消（**不可**重试：重试就是无视取消）；
+ *   - NO_MODEL / NO_LLM：配置问题（不可重试）。
  */
 import { randomUUID } from 'node:crypto'
 import { PlannerError } from './schema.js'
@@ -102,7 +109,8 @@ function raceWithLimits(
   }
   if (external != null) {
     guards.push(new Promise<never>((_, reject) => {
-      const handler = (): void => reject(new PlannerError('ABORTED', '模型调用已取消'))
+      // 调用方取消：不是模型的错，不该重试（重试就是无视取消）。
+      const handler = (): void => reject(new PlannerError('CANCELLED', '模型调用已取消'))
       onAbort = handler
       if (external.aborted) handler()
       else external.addEventListener('abort', handler, { once: true })
@@ -155,7 +163,10 @@ export async function callModel(ctx: unknown, req: CallModelRequest): Promise<st
     })) {
       if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
         text += chunk.text
-      } else if (chunk.type === 'finish' && (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted')) {
+      } else if (chunk.type === 'finish' && chunk.reason?.kind === 'aborted') {
+        // 上游把这次调用中止了（流中断 / provider 侧 abort）：归成 ABORTED，可重试。
+        throw new PlannerError('ABORTED', chunk.reason?.failure?.message ?? '响应流中断')
+      } else if (chunk.type === 'finish' && chunk.reason?.kind === 'error') {
         throw new PlannerError('MODEL_ERROR', chunk.reason?.failure?.message ?? '模型调用失败')
       }
     }

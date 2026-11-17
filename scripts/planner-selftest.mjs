@@ -196,5 +196,69 @@ async function run(schema, prompt, gen) {
   const retried = await gen.generatePlan({ ctx: flakyCtx, sentence: 'x' })
   ok('⑥ 树阶段的流断了会重试', treeCalls === 2, treeCalls)
   ok('⑥ 重试后仍拿到完整计划', retried.modules.flatMap((m) => m.tasks).every((t) => t.design != null))
+
+  // ===== ⑦ 树阶段第一次 ABORTED（上游把流中止了）→ 会重试 =====
+  let abortCalls = 0
+  const abortCtx = {
+    get(key) {
+      if (key === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      if (key === 'llm') {
+        return {
+          prepareCall: async () => ({
+            config: {},
+            stream: async function* (payload) {
+              const user = payload.messages[0].content[0].text
+              if (user.includes('字段固定五个')) {
+                yield { type: 'text-delta', text: JSON.stringify(DESIGN_RAW) }
+                yield { type: 'finish', reason: { kind: 'stop' } }
+                return
+              }
+              abortCalls += 1
+              if (abortCalls === 1) {
+                yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'This operation was aborted' } } }
+                return
+              }
+              yield { type: 'text-delta', text: JSON.stringify(treeRaw()) }
+              yield { type: 'finish', reason: { kind: 'stop' } }
+            },
+          }),
+        }
+      }
+      return undefined
+    },
+  }
+  const afterAbort = await gen.generatePlan({ ctx: abortCtx, sentence: 'x' })
+  ok('⑦ 树阶段第一次 ABORTED 会重试（不是立刻失败）', abortCalls === 2, abortCalls)
+  ok('⑦ 重试后拿到完整计划', afterAbort.modules.flatMap((m) => m.tasks).every((t) => t.design != null))
+
+  // ===== ⑧ 预算耗尽 → 报错要可行动（中文提示 + 实际尝试次数，不是裸的 aborted） =====
+  let burnCalls = 0
+  const burnCtx = {
+    get(key) {
+      if (key === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      if (key === 'llm') {
+        return {
+          prepareCall: async () => ({
+            config: {},
+            stream: async function* () {
+              burnCalls += 1
+              await new Promise((r) => setTimeout(r, 1200))
+              yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'This operation was aborted' } } }
+            },
+          }),
+        }
+      }
+      return undefined
+    },
+  }
+  let burnErr = null
+  try {
+    await gen.generatePlan({ ctx: burnCtx, sentence: 'x', timeoutMs: 10000, maxAttempts: 20 })
+  } catch (e) { burnErr = e }
+  ok('⑧ 预算耗尽会抛错', burnErr != null)
+  ok('⑧ 报错有可行动的中文提示', burnErr != null && burnErr.message.includes('再点一次') && burnErr.message.includes('换一个更快的模型'), burnErr && burnErr.message)
+  ok('⑧ 报错带实际尝试次数', burnErr != null && /尝试 \d+ 次/.test(burnErr.message), burnErr && burnErr.message)
+  ok('⑧ 报错不是裸的 aborted', burnErr != null && !/aborted/i.test(burnErr.message), burnErr && burnErr.message)
+  ok('⑧ 报错带最后一次失败原因', burnErr != null && burnErr.message.includes('响应流中断'), burnErr && burnErr.message)
 }
 
