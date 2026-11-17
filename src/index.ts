@@ -17,6 +17,7 @@ import z from '@deepseek-ai/schemastery'
 import { apply as applyBoard } from './board/index.js'
 import type { PlanHook } from './board/routes.js'
 import { applyPlanToBoard, collectRepoContext, generatePlan } from './planner/index.js'
+import { announceMode, ModeStore } from './mode.js'
 import { applyBridge } from './bridge/index.js'
 import { registerPlanner } from './planner/index.js'
 
@@ -31,7 +32,8 @@ export const name = 'dsh-plan-superagent'
  * 的服务全部到位时才加载插件，引擎没装 → 整个插件永不激活（板与 plan_generate 一起废掉）。
  * 桥自己用嵌套 ctx.inject(['orchestrator'], cb) 挂载：引擎在就挂、不在就跳过。
  */
-export const inject = ['tools']
+// 'sessionController' lets the plan-mode switch deliver its instruction into the Session it belongs to.
+export const inject = ['tools', 'sessionController']
 
 /**
  * 解析后的插件配置以服务形式挂在 ctx 上，供桥/规划器读取：`ctx.get('planSuperagentConfig')`。
@@ -125,12 +127,19 @@ export function apply(ctx: Context, config: Partial<Config> = {}): () => void {
 
   // ② 板那半：自带嵌套 inject(['webServer','tools'])，web profile 才挂路由与板工具。
   try {
+    const modeStore = new ModeStore(cfg.stateDir)
     const disposeBoard = applyBoard(ctx as unknown as BoardHost, {
       stateDir: cfg.stateDir,
       blockOnDrift: cfg.blockOnDrift,
       observeTools: cfg.observeTools,
       enforceScope: cfg.enforceScope,
-    }, { plan })
+    }, {
+      plan,
+      mode: {
+        store: modeStore,
+        announce: (sessionId, mode, project) => announceMode(ctx, sessionId, mode, project),
+      },
+    })
     if (typeof disposeBoard === 'function') disposers.push(disposeBoard)
   } catch (error) {
     ctx.logger.error('[dsh-plan-superagent] 板加载失败（面板与板工具不可用）：%s', describe(error))

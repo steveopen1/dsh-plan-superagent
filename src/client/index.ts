@@ -72,8 +72,6 @@ interface BoardData {
  *   { op:'set_deps', id, deps }
  * 面板改内容时必须保持原形状 —— 形状错了服务端 applyOps 直接抛 UNKNOWN_OP。
  */
-const PLAN_TIMEOUT_MS = 180_000
-
 interface OpInit { op: 'init_board'; name: string; goal: string }
 interface OpAdd {
   op: 'add_node'
@@ -294,6 +292,70 @@ async function readJson(r: Response): Promise<Record<string, unknown>> {
 function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s
 }
+
+/**
+ * ===== 计划板模式（原生对话框旁的开关） =====
+ * 模式按会话存在服务端（会话重建、插件重启都不丢），前端只负责如实显示 + 切换。
+ * 'plan' = 开发类需求先走计划板；'direct' = 按常规直接动手。
+ */
+type PbMode = 'plan' | 'direct'
+
+/** 模式值归一：只认 'plan' / 'direct'，别的（缺字段/脏数据）当没有。 */
+function normalizeMode(v: unknown): PbMode | null {
+  return v === 'plan' || v === 'direct' ? v : null
+}
+
+/** 会话 id 归一（空串/缺失都算没有）。 */
+function normalizeSessionId(v: unknown): string | null {
+  if (typeof v !== 'string') return null
+  const s = v.trim()
+  return s === '' ? null : s
+}
+
+/**
+ * 会话 id 的取法。
+ * 主路径：插槽注册里的 inject(sessionId) —— 宿主渲染输入栏时按会话注入，
+ * 证据：宿主 slots 运行时的 runInject 会把 scope 绑定的 key（即会话 id）作为第一个实参传给 inject。
+ * 兜底：URL 上的 session/sessionId 参数（宿主将来换路由也不至于瞎猜）。
+ */
+function resolveSessionId(prop: unknown, loc?: { search?: string; hash?: string }): string | null {
+  const direct = normalizeSessionId(prop)
+  if (direct != null) return direct
+  try {
+    const l = loc ?? (typeof window === 'undefined' ? null : window.location)
+    if (l == null) return null
+    const q = new URLSearchParams(l.search ?? '')
+    const hash = (l.hash ?? '').replace(/^#/, '')
+    const h = new URLSearchParams(hash)
+    const path = /\/session\/([^/?#]+)/.exec(hash)
+    return normalizeSessionId(q.get('session') ?? q.get('sessionId') ?? h.get('session') ?? h.get('sessionId') ?? (path == null ? null : path[1]))
+  } catch { return null }
+}
+
+/** 开关文案：关 = 直改，开 = 计划板：开（一眼看出当前模式）。 */
+function modeLabel(mode: PbMode): string {
+  return mode === 'plan' ? '计划板：开' : '直改'
+}
+
+/** 点击切换的目标模式。 */
+function nextMode(mode: PbMode): PbMode {
+  return mode === 'plan' ? 'direct' : 'plan'
+}
+
+/**
+ * POST /mode 的请求体。模式本身不放 localStorage（服务端按会话存）。
+ * project 只是顺手带上：服务端现在的 /mode 分支排在 project 校验之后，不带会被 400 打回。
+ */
+function modeRequestBody(sessionId: string, mode: PbMode, project?: string): { sessionId: string; mode: PbMode; project?: string } {
+  const body: { sessionId: string; mode: PbMode; project?: string } = { sessionId, mode }
+  if (typeof project === 'string' && project !== '') body.project = project
+  return body
+}
+
+/** 读响应里的模式值（错误体没有 mode）。 */
+function parseMode(j: Record<string, unknown>): PbMode | null {
+  return normalizeMode(j.mode)
+}
 const STATUS_COLOR: Record<string, string> = {
   planned: '#94a3b8', ready: '#3b82f6', doing: '#f59e0b',
   blocked: '#ef4444', done: '#10b981', canceled: '#6b7280',
@@ -447,11 +509,14 @@ const CSS = [
   '.pb-tag.pb-on{border-color:#8b5cf6;color:#7c3aed;background:rgba(139,92,246,.12)}',
   '[data-mode="dark"] .pb-tag.pb-on{color:#a78bfa}',
   '.pb-tag:hover{filter:brightness(1.08)}',
-  '.pb-oneline{display:flex;gap:6px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--pb-line)}',
-  '.pb-oneline .pb-input{font-family:ui-sans-serif,system-ui,sans-serif}',
-  '.pb-planmsg{padding:7px 12px;font-size:11px;line-height:1.6;background:rgba(139,92,246,.10);border-bottom:1px solid rgba(139,92,246,.35);color:#7c3aed;word-break:break-word}',
-  '[data-mode="dark"] .pb-planmsg{color:#a78bfa}',
-  '.pb-planmsg.pb-err{background:rgba(239,68,68,.12);border-bottom-color:rgba(239,68,68,.5);color:#ef4444}',
+  // 模式开关挂在宿主输入栏里（不在面板内），所以样式自带颜色：紫色主题 + color:inherit 跟随宿主文字色
+  '.pb-modewrap{display:inline-flex;align-items:center;gap:6px;max-width:100%}',
+  '.pb-modebtn{cursor:pointer;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap;',
+  'border:1px solid rgba(139,92,246,.55);background:rgba(139,92,246,.12);color:inherit}',
+  '.pb-modebtn:hover{filter:brightness(1.08)}',
+  '.pb-modebtn.pb-on{background:#8b5cf6;border-color:#8b5cf6;color:#fff;box-shadow:0 0 0 1px rgba(139,92,246,.35),0 2px 10px rgba(124,58,237,.35)}',
+  '.pb-modebtn:disabled{opacity:.5;cursor:not-allowed}',
+  '.pb-modeerr{font-size:11px;color:#ef4444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}',
   '.pb-ops{border:1px dashed var(--pb-line);border-radius:8px;padding:6px;margin:6px 0;display:flex;flex-direction:column;gap:6px;background:rgba(100,116,139,.05)}',
   '.pb-oprow{border:1px solid var(--pb-line);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:5px;background:var(--pb-card)}',
   '.pb-ophead{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--pb-muted)}',
@@ -879,6 +944,57 @@ function ApprovalCard(props: ApprovalCardProps): ReturnType<typeof h> {
       h('button', { className: 'pb-btn', disabled: busy || !dirty, onClick: onReset }, '重置为原提案'),
       h('span', { className: 'pb-hint' }, dirty ? '已修改（原 ' + origOps.length + ' 条 → 现 ' + ops.length + ' 条）' : '未修改')))
 }
+/**
+ * 计划板模式开关：挂在宿主输入栏左侧（conversation.input.left 插槽，与权限/计划芯片同一排）。
+ * 状态按会话存在服务端：挂载时 GET /mode 读回，点一下 POST /mode 切。
+ * 失败只在按钮旁显示一行小字 —— 输入栏旁边弹 alert 会吓人。
+ */
+function PlanBoardModeChip(props: { sessionId?: string }): ReturnType<typeof h> {
+  ensureStyles()
+  const [mode, setMode] = useState<PbMode>('direct')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const sid = resolveSessionId(props.sessionId)
+  useEffect(() => {
+    if (sid == null) return
+    let stop = false
+    void (async () => {
+      try {
+        const r = await fetch(API + '/mode?sessionId=' + encodeURIComponent(sid))
+        const j = await readJson(r)
+        if (stop) return
+        const m = parseMode(j)
+        if (m != null) setMode(m)
+        else setErr(errText(j.error))
+      } catch (e) { if (!stop) setErr(String(e)) }
+    })()
+    return () => { stop = true }
+  }, [sid])
+  const toggle = async (): Promise<void> => {
+    if (busy || sid == null) return
+    const target = nextMode(mode)
+    setBusy(true)
+    setErr('')
+    try {
+      // project 顺手带上（服务端 /mode 分支现在排在 project 校验之后）
+      const j = await post('/mode', modeRequestBody(sid, target, loadProject()))
+      if (j.ok !== true) { setErr(errText(j.error)); return }
+      const m = parseMode(j)
+      if (m != null) setMode(m)
+    } catch (e) { setErr(String(e)) } finally { setBusy(false) }
+  }
+  return h('span', { className: 'pb-modewrap' },
+    h('button', {
+      className: 'pb-modebtn' + (mode === 'plan' ? ' pb-on' : ''),
+      disabled: busy || sid == null,
+      'aria-pressed': mode === 'plan',
+      title: sid == null
+        ? '拿不到会话 id，模式开关不可用'
+        : mode === 'plan' ? '计划板模式已开：开发类需求先走计划板（点一下关掉）' : '当前直改：开发类需求直接动手（点一下让需求先走计划板）',
+      onClick: () => { void toggle() },
+    }, modeLabel(mode)),
+    err !== '' ? h('span', { className: 'pb-modeerr', role: 'status', title: err }, clip(err, 36)) : null)
+}
 function PaneWindow(): ReturnType<typeof h> | null {
   const [open, setOpen] = useState(openState)
   const [project, setProject] = useState(loadProject())
@@ -895,18 +1011,11 @@ function PaneWindow(): ReturnType<typeof h> | null {
   const [depLine, setDepLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null)
   const [newChild, setNewChild] = useState('')
   const [recent, setRecent] = useState<{ project: string; name: string }[]>([])
-  // ===== 一句话生成（POST /plan）+ 待批提案编辑态 =====
-  const [sentence, setSentence] = useState('')
-  const [planBusy, setPlanBusy] = useState(false)
-  const [planMsg, setPlanMsg] = useState('')
-  const [planMsgErr, setPlanMsgErr] = useState(false)
+  // ===== 待批提案编辑态 =====
   const [projListOpen, setProjListOpen] = useState(false)
   const [apEdits, setApEdits] = useState<Record<string, PbOp[]>>({})
   const [apBusy, setApBusy] = useState('')
   const [apRev, setApRev] = useState(0)
-  const planAbortRef = useRef<AbortController | null>(null)
-  const planCancelRef = useRef(false)
-  const planTimeoutRef = useRef(false)
   // 依赖候选项 = 板子上的节点（提案新增的节点在渲染时再并进来）
   const depOptions = useMemo<DepOption[]>(() => (data?.board.nodes ?? []).map(n => ({ id: n.id, title: n.title, type: n.type })), [data])
   const [view, setView] = useState({ k: 1, tx: 0, ty: 0 })
@@ -920,8 +1029,7 @@ function PaneWindow(): ReturnType<typeof h> | null {
   }, [])
   useEffect(() => {
     const t = setInterval(() => { const d = appDark(); setMode(prev => (prev === (d ? 'dark' : 'light') ? prev : (d ? 'dark' : 'light'))) }, 2000)
-    // 面板被关掉时中止在途的生成请求（否则回调会打到已卸载的组件上）
-    return () => { clearInterval(t); planAbortRef.current?.abort() }
+    return () => clearInterval(t)
   }, [])
   useEffect(() => {
     if (!open || !isAbsoluteProject(project)) return
@@ -1121,66 +1229,6 @@ function PaneWindow(): ReturnType<typeof h> | null {
     setSaving(false);
   };
   const discard = (): void => { setDrafts({}); setAdded([]); setRemoved([]); setEditorId(null); setSaveMsg('') };
-  // ===== 一句话生成导图：服务端 LLM 出三层树 + 每任务子导图，进待批队列（人审门保留） =====
-  const submitPlan = async (): Promise<void> => {
-    const s = sentence.trim()
-    if (s === '' || planBusy) return
-    if (!isAbsoluteProject(project)) {
-      setPlanMsgErr(true)
-      setPlanMsg('⚠ 先在上面填项目根目录绝对路径（Windows 形如 C:\\Users\\me\\project）')
-      return
-    }
-    const ctrl = new AbortController()
-    planAbortRef.current = ctrl
-    planCancelRef.current = false
-    planTimeoutRef.current = false
-    setPlanBusy(true)
-    setPlanMsgErr(false)
-    setPlanMsg('⏳ 正在按这句话生成导图（LLM 可能要几十秒，可随时取消）…')
-    const timer = setTimeout(() => { planTimeoutRef.current = true; ctrl.abort() }, PLAN_TIMEOUT_MS)
-    try {
-      const r = await fetch(API + '/plan', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ project, sentence: s }),
-        signal: ctrl.signal,
-      })
-      const j = await readJson(r)
-      if (j.ok !== true) {
-        setPlanMsgErr(true)
-        setPlanMsg('⛔ 生成失败：' + errText(j.error))
-        return
-      }
-      setSentence('')
-      const mods = Number(j.moduleCount ?? 0)
-      const tasks = Number(j.taskCount ?? 0)
-      const apId = String(j.approvalId ?? '')
-      const planName = String((j.plan as { name?: unknown } | undefined)?.name ?? '')
-      setPlanMsgErr(false)
-      setPlanMsg('✅ 已生成 ' + mods + ' 个模块 / ' + tasks + ' 个任务' + (planName !== '' ? '（' + planName + '）' : '')
-        + '，待你确认：' + apId + (j.pendingApproval === false ? '（服务端已直接生效）' : '（下面可直接改内容）'))
-      setNonce(n => n + 1)
-    } catch (e) {
-      if (planCancelRef.current) {
-        setPlanMsgErr(false)
-        setPlanMsg('已取消')
-      } else if (planTimeoutRef.current) {
-        setPlanMsgErr(true)
-        setPlanMsg('⛔ 生成超时（' + Math.round(PLAN_TIMEOUT_MS / 1000) + 's）——可以重试或换句话说')
-      } else {
-        setPlanMsgErr(true)
-        setPlanMsg('⛔ 生成失败：' + String(e))
-      }
-    } finally {
-      clearTimeout(timer)
-      if (planAbortRef.current === ctrl) planAbortRef.current = null
-      setPlanBusy(false)
-    }
-  }
-  const cancelPlan = (): void => {
-    planCancelRef.current = true
-    planAbortRef.current?.abort()
-  }
   // ===== 待批提案：确认时可带改过的 ops（服务端用提交的 ops 覆盖原提案再生效） =====
   const approveAp = async (ap: { id: string; ops: unknown[] }): Promise<void> => {
     const orig = normOps(ap.ops)
@@ -1278,18 +1326,6 @@ function PaneWindow(): ReturnType<typeof h> | null {
         title: r.project,
         onClick: () => { setProject(r.project); setProjListOpen(false); setSaveMsg(''); void rememberProject(r.project) },
       }, projListOpen ? clip(r.name, 18) + ' · ' + r.project : clip(r.name, 18)))),
-    h('div', { className: 'pb-oneline' },
-      h('input', {
-        className: 'pb-input',
-        value: sentence,
-        disabled: planBusy,
-        placeholder: '用一句话描述要做什么，例如：给插件加一个把任务导出成 Markdown 的命令',
-        onChange: (e: { target: { value: string } }) => setSentence(e.target.value),
-        onKeyDown: (e: { key: string }) => { if (e.key === 'Enter' && !planBusy) void submitPlan() },
-      }),
-      h('button', { className: 'pb-btn pb-vio', disabled: planBusy || sentence.trim() === '', onClick: () => { void submitPlan() } }, planBusy ? '生成中…' : '生成导图'),
-      planBusy ? h('button', { className: 'pb-btn pb-no', onClick: cancelPlan }, '取消') : null),
-    planMsg !== '' ? h('div', { className: 'pb-planmsg' + (planMsgErr ? ' pb-err' : '') }, planMsg) : null,
     err !== '' ? h('div', { className: 'pb-banner pb-drift' }, '⚠ ' + err) : null,
     b == null ? h('div', { className: 'pb-body' },
       h('div', { className: 'pb-card' },
@@ -1388,6 +1424,15 @@ export function apply(ctx: SlotsCtx): void {
   ctx.effect(() => {
     ctx.slots.inject('shell.overlay', () =>
       ctx.slots.register({ name: 'shell.overlay', id: NS + ':pane', order: 85 }, PaneWindow as unknown as (props: never) => unknown))
+    // 计划板模式开关：挂原生输入栏左侧（与权限/计划芯片同一排）。
+    // list 型插槽按 id 去重，id 必须全宿主唯一 —— 用 NS 前缀，且不能与旧插件同名。
+    // inject 收到的第一个实参就是会话 id（宿主 slots 的 runInject 把 scope 绑定 key 传进来）。
+    ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+      name: 'conversation.input.left',
+      id: NS + ':mode',
+      order: -1,
+      inject: (sessionId: string) => ({ sessionId }),
+    }, PlanBoardModeChip as unknown as (props: never) => unknown))
     ctx.slots.inject('conversation.session.header.utilities', () =>
       // 槽位 order 梯队（升序，勿与他插件撞值）：billing -2 → android-pane -1 → 本插件 -0.5 → SLog 0 → delete 1。
       // v0.2.0 曾克隆 android-pane 骨架连 -1 一起复制，同槽同值导致「谁最后 reload 谁靠右」乒乓换位（09-16 四次实录）。

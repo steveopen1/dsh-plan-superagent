@@ -37,7 +37,7 @@ type HostCtx = Context & {
   logger?: { info(msg: string): void; warn(msg: string): void; error(msg: string): void }
 }
 
-export function apply(ctx: HostCtx, config: Partial<Config> = {}, deps: { plan?: import('./routes.js').PlanHook } = {}): () => void {
+export function apply(ctx: HostCtx, config: Partial<Config> = {}, deps: { plan?: import('./routes.js').PlanHook; mode?: import('./routes.js').ModeDeps } = {}): () => void {
   const opts: StoreOpts = { blockOnDrift: config.blockOnDrift ?? true }
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const stateDir = config.stateDir !== undefined && config.stateDir !== '' ? config.stateDir : join(dshHome, 'dsh-plan-board')
@@ -60,7 +60,7 @@ export function apply(ctx: HostCtx, config: Partial<Config> = {}, deps: { plan?:
       log,
     })
     registry.guard = guard
-    cleanups.push(mountRoutes(host.webServer as never, registry, deps.plan))
+    cleanups.push(mountRoutes(host.webServer as never, registry, deps.plan, deps.mode))
     registerBoardTools(host.tools as never, stateDir, opts, registry.onEvent, (p, n) => registry.remember(p, n))
     log('routes ready: ' + ROUTE_PREFIX + ' | blockOnDrift=' + String(opts.blockOnDrift) + ' | enforceScope=' + String(config.enforceScope !== false))
 

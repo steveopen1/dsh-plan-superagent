@@ -39,10 +39,24 @@ export interface PlanHook {
         sentence: string;
     }): Promise<Record<string, unknown>>;
 }
+/** The plan-mode store and the announcer that tells a Session its mode changed. */
+export interface ModeDeps {
+    store: {
+        get(sessionId: string): {
+            mode: 'plan' | 'direct';
+            at: string;
+        } | undefined;
+        set(sessionId: string, mode: 'plan' | 'direct'): {
+            mode: 'plan' | 'direct';
+            at: string;
+        };
+    };
+    announce: (sessionId: string, mode: 'plan' | 'direct', project: string) => Promise<boolean>;
+}
 export declare function mountRoutes(webServer: {
     register(route: {
         kind: 'exact' | 'prefix';
         path: string;
         handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
     }): () => void;
-}, registry: BoardRegistry, plan?: PlanHook): () => void;
+}, registry: BoardRegistry, plan?: PlanHook, mode?: ModeDeps): () => void;

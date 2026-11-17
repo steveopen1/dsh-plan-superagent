@@ -148,10 +148,17 @@ export interface PlanHook {
   (input: { project: string; sentence: string }): Promise<Record<string, unknown>>
 }
 
+/** The plan-mode store and the announcer that tells a Session its mode changed. */
+export interface ModeDeps {
+  store: { get(sessionId: string): { mode: 'plan' | 'direct'; at: string } | undefined; set(sessionId: string, mode: 'plan' | 'direct'): { mode: 'plan' | 'direct'; at: string } }
+  announce: (sessionId: string, mode: 'plan' | 'direct', project: string) => Promise<boolean>
+}
+
 export function mountRoutes(
   webServer: { register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void },
   registry: BoardRegistry,
   plan?: PlanHook,
+  mode?: ModeDeps,
 ): () => void {
   const unregister = webServer.register({
     kind: 'prefix',
@@ -189,6 +196,14 @@ export function mountRoutes(
             return
           }
           if (sub === '/projects') { sendJson(res, 200, { ok: true, projects: registry.projects() }); return }
+          if (sub === '/mode') {
+            const sessionId = u.searchParams.get('sessionId') ?? ''
+            if (sessionId === '') { sendErr(res, 400, 'NO_SESSION', 'sessionId 不能为空'); return }
+            if (mode == null) { sendErr(res, 501, 'NO_MODE', '计划板模式未装配'); return }
+            const record = mode.store.get(sessionId)
+            sendJson(res, 200, { ok: true, sessionId, mode: record?.mode ?? 'direct', at: record?.at })
+            return
+          }
           sendErr(res, 404, 'NOT_FOUND', '未知路径 ' + sub)
           return
         }
@@ -196,6 +211,20 @@ export function mountRoutes(
           if (!sameOriginHost(req)) { sendErr(res, 403, 'SAME_ORIGIN', '跨站请求被拒绝'); return }
           const body = await readJsonBody(req)
           if (body == null) { sendErr(res, 400, 'BAD_JSON', 'JSON 体缺失或非法（上限 64KB）'); return }
+          // The mode belongs to a Session, not to a project: answer it before the project check.
+          if (sub === '/mode') {
+            const sessionId = String(body.sessionId ?? '')
+            const wanted = String(body.mode ?? '')
+            if (sessionId === '') { sendErr(res, 400, 'NO_SESSION', 'sessionId 不能为空'); return }
+            if (wanted !== 'plan' && wanted !== 'direct') { sendErr(res, 400, 'BAD_MODE', 'mode 必须是 plan|direct'); return }
+            if (mode == null) { sendErr(res, 501, 'NO_MODE', '计划板模式未装配'); return }
+            const record = mode.store.set(sessionId, wanted)
+            // Tell the Session: the agent reads this as its working instruction for the next turn.
+            const latest = Object.entries(registry.projects()).sort((a, b) => (b[1].at ?? '').localeCompare(a[1].at ?? ''))[0]
+            const announced = await mode.announce(sessionId, wanted, latest?.[0] ?? '')
+            sendJson(res, 200, { ok: true, sessionId, mode: record.mode, at: record.at, announced })
+            return
+          }
           const project = String(body.project ?? '')
           if (!isAbsolutePath(project)) { sendErr(res, 400, 'BAD_PROJECT', 'project 必须是绝对路径'); return }
           const store = PlanStore.open(project, registry.opts, registry.onEvent)

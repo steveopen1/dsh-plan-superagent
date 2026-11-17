@@ -38,5 +38,6 @@ type HostCtx = Context & {
 };
 export declare function apply(ctx: HostCtx, config?: Partial<Config>, deps?: {
     plan?: import('./routes.js').PlanHook;
+    mode?: import('./routes.js').ModeDeps;
 }): () => void;
 export {};
