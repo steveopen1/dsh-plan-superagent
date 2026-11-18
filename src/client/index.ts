@@ -6,8 +6,8 @@
  * 自由拖拽节点（位置持久化 pos）、拖拽连线改依赖（A 拖到 B = B 依赖 A，再拖一次 = 移除）、
  * ＋子任务 / 删除节点；一切改动先进草稿态，点「保存更改」才 POST /edit 生效（用户拍板：不保存不生效）。
  */
-import { createElement as h, useEffect, useMemo, useRef, useState } from 'react'
-import type { MutableRefObject, RefObject } from 'react'
+import { Component, createElement as h, useEffect, useMemo, useRef, useState } from 'react'
+import type { MutableRefObject, ReactNode, RefObject } from 'react'
 
 type WEv = { deltaY: number; preventDefault(): void }
 type PEv = { clientX: number; clientY: number; pointerId: number; target: Element; stopPropagation(): void }
@@ -553,6 +553,11 @@ const CSS = [
   '.pb-deps{display:flex;flex-direction:column;gap:2px;max-height:150px;overflow:auto;border:1px solid var(--pb-line);border-radius:6px;padding:4px;background:var(--pb-bg)}',
   '.pb-deps .pb-deprow{font-size:11px}',
   '.pb-cycle{font-size:11px;font-weight:700;color:#ef4444;line-height:1.5}',
+  // 崩溃面：宿主那道边界只会留空 div，这里自己给一句人话 + 一个重载按钮
+  '.pb-crash{padding:14px;border:1px solid rgba(239,68,68,.5);border-radius:10px;background:rgba(239,68,68,.08);display:flex;flex-direction:column;gap:8px;font-size:12px;color:inherit}',
+  '.pb-crash-title{font-weight:700;color:#ef4444;font-size:13px}',
+  '.pb-crash-msg{opacity:.85;line-height:1.6}',
+  '.pb-crash-btn{cursor:pointer;align-self:flex-start;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid #ef4444;background:#ef4444;color:#fff}',
   // ===== 子导图 =====
   '.pb-designbar{display:flex;align-items:center;gap:8px;margin-top:2px}',
   '.pb-design{border:1px dashed var(--pb-line);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:8px;background:rgba(100,116,139,.05)}',
@@ -658,6 +663,9 @@ function MindMap(props: MapProps): ReturnType<typeof h> {
     const el = mapRef.current
     if (el == null) return
     const onWheel = (e: WheelEvent): void => {
+      // 只在真要缩放时（Ctrl/⌘ + 滚轮）才吃掉默认行为；普通滚动放行，
+      // 否则面板在导图上根本滚不动（用户说的"滑动两下"其实是被吞掉的滚动）
+      if (!e.ctrlKey && !e.metaKey) return
       e.preventDefault()
       setView(v => ({ ...v, k: Math.min(2.2, Math.max(0.35, v.k * (e.deltaY > 0 ? 0.92 : 1.08))) }))
     }
@@ -667,7 +675,13 @@ function MindMap(props: MapProps): ReturnType<typeof h> {
   return h('div', {
     className: 'pb-map',
     ref: mapRef,
-    onPointerDown: (e: PEv) => { if (dragRef.current != null) return; drag.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty }; (e.target as Element).setPointerCapture?.(e.pointerId) },
+    onPointerDown: (e: PEv) => {
+      if (dragRef.current != null) return
+      drag.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty }
+      // 指针捕获在指针已失效时会抛：React 18 里事件处理器的未捕获异常会卸载整棵树（整页白）。
+      // 失败就当没捕获到，继续用普通事件（跟节点那条路径一个写法）。
+      try { (e.target as Element).setPointerCapture?.(e.pointerId) } catch { /* 没捕获到也能拖 */ }
+    },
     onPointerMove: (e: PEv) => {
       const d = dragRef.current
       if (d != null && d.kind === 'node') {
@@ -682,17 +696,26 @@ function MindMap(props: MapProps): ReturnType<typeof h> {
         if (f != null) setDepLine({ x1: f.x + f.w, y1: f.y + f.h / 2, x2: p.x, y2: p.y })
         return
       }
-      if (drag.current == null) return
-      setView(v => ({ ...v, tx: drag.current!.tx + (e.clientX - drag.current!.x), ty: drag.current!.ty + (e.clientY - drag.current!.y) }))
+      // 先把 ref 读成局部常量：setView 的 updater 是渲染期才执行的，
+      // 那时 pointerup 可能已经把 drag.current 清空 —— 读 ref 就会抛（面板整块空白）。
+      const base = drag.current
+      if (base == null) return
+      setView(v => ({ ...v, tx: base.tx + (e.clientX - base.x), ty: base.ty + (e.clientY - base.y) }))
     },
     onPointerUp: (e: PEv) => {
       const d = dragRef.current
       dragRef.current = null
       setDepLine(null)
+      // 画布拖拽状态无条件清：节点/连线分支原来提前 return，状态会粘住 → 鼠标一动画布自己跑
+      drag.current = null
       if (d != null && d.kind === 'node') { if (!d.moved) onNodeClick(d.id); return }
       if (d != null && d.kind === 'dep') { onDepDrop(d.from, { clientX: e.clientX, clientY: e.clientY }); return }
-      drag.current = null
     },
+    // 取消类事件（指针被系统取消 / 移出容器 / 捕获丢失）：统一清拖拽状态。
+    // 不清的话下一次 pointermove 会继续按"还在拖"处理 → 画布自己跑、节点自己跟。
+    onPointerCancel: () => { drag.current = null; dragRef.current = null; setDepLine(null) },
+    onPointerLeave: () => { drag.current = null; dragRef.current = null; setDepLine(null) },
+    onLostPointerCapture: () => { drag.current = null; dragRef.current = null; setDepLine(null) },
   },
     h('svg', { width: '100%', height: Math.max(layout.totalH, 300), ref: svgRef, key: b.version },
       h('g', { transform: 'translate(' + view.tx + ',' + view.ty + ') scale(' + view.k + ')' },
@@ -973,6 +996,39 @@ function PanelBoardIcon(props: { size?: number; active?: boolean }): ReturnType<
     h('path', { d: 'M9.2 9.2V20' }),
     h('path', { d: 'M12.8 13.2h4.4M12.8 16.6h4.4' }))
 }
+interface PanelBoundaryProps { children?: ReactNode; onReset: () => void }
+interface PanelBoundaryState { error: Error | null }
+
+/**
+ * 面板自己的错误边界。
+ * 宿主虽然有 SlotErrorBoundary，但它的崩溃面是**空 div**，而且会把条目永久退役（abdicate）
+ * → 用户只看到一块空白、没有出口。这里自己接住：一句人话提示 + 一个"重新加载面板"按钮。
+ */
+class PanelBoundary extends Component<PanelBoundaryProps, PanelBoundaryState> {
+  state: PanelBoundaryState = { error: null }
+  componentDidCatch(error: Error): void {
+    console.error('[dsh-plan-superagent] 面板渲染异常：', error)
+    this.setState({ error })
+  }
+  render(): ReactNode {
+    const err = this.state.error
+    if (err != null) {
+      return h('div', { className: 'pb-crash' },
+        h('div', { className: 'pb-crash-title' }, '面板出错了'),
+        h('div', { className: 'pb-crash-msg' }, '这一次的渲染抛了异常，导图与编辑卡先停在这里。'
+          + (err.message !== '' ? '（' + clip(err.message, 140) + '）' : '')),
+        h('button', { className: 'pb-crash-btn', onClick: () => { this.setState({ error: null }); this.props.onReset() } }, '重新加载面板'))
+    }
+    return this.props.children ?? null
+  }
+}
+
+/** 面板外壳：错误边界 + 重挂载（崩了能自己回来，而不是留一块空白）。 */
+function PanelHost(props: { sessionId?: string }): ReturnType<typeof h> {
+  const [gen, setGen] = useState(0)
+  return h(PanelBoundary, { onReset: () => setGen(g => g + 1) },
+    h('div', { key: gen, style: { display: 'contents' } }, h(PaneWindow)))
+}
 function PaneWindow(): ReturnType<typeof h> | null {
   const [collapsed, setCollapsed] = useState(false)
   const [project, setProject] = useState(loadProject())
@@ -1005,6 +1061,12 @@ function PaneWindow(): ReturnType<typeof h> | null {
   const dragRef = useRef<{ kind: 'node'; id: string; sx: number; sy: number; bx: number; by: number; moved: boolean } | { kind: 'dep'; from: string } | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const editorRef = useRef<HTMLDivElement | null>(null)
+  // /stream 重连定时器（清理时必须清掉，见下方 effect）
+  const streamTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 「当前选中的任务」的最新值：异步回调要判断"回来的响应是不是还属于当前任务"，
+  // 闭包里的 editorId 只是发起时的快照。每次渲染同步一次（幂等，React 严格模式下也安全）。
+  const editorIdRef = useRef<string | null>(null)
+  editorIdRef.current = editorId
   useEffect(() => {
     const t = setInterval(() => { const d = appDark(); setMode(prev => (prev === (d ? 'dark' : 'light') ? prev : (d ? 'dark' : 'light'))) }, 2000)
     return () => clearInterval(t)
@@ -1016,7 +1078,11 @@ function PaneWindow(): ReturnType<typeof h> | null {
     setDesignMsg('')
   }, [editorId])
   useEffect(() => {
-    if (!open || !isAbsoluteProject(project)) return
+    // 面板只在宿主把它挂上来的时候存在（main 槽），所以"可见"不需要再判断一次。
+    // （旧代码这里判的是 open —— 那个状态在改成主区面板时已经删掉，却留在了代码里，
+    //   于是 open 静默解析成全局 window.open：宿主没有它时这两个轮询 effect 直接 return，
+    //   面板就永远不刷新。现在彻底不依赖任何全局 window.open。）
+    if (!isAbsoluteProject(project)) return
     const ctrl = new AbortController()
     let stop = false
     const run = async (): Promise<void> => {
@@ -1038,16 +1104,29 @@ function PaneWindow(): ReturnType<typeof h> | null {
           }
         }
       } catch { /* abort 或连接失败 */ }
-      if (!stop) setTimeout(() => { void run() }, 3000)
+      // 重连定时器记进 ref：清理时必须清掉，否则面板关掉/切项目后它仍会触发，
+      // 又开一条没人管的 /stream 连接（关了面板还在动）
+      if (!stop) {
+        streamTimerRef.current = setTimeout(() => { streamTimerRef.current = null; void run() }, 3000)
+      }
     };
     void run()
-    return () => { stop = true; ctrl.abort() }
-  }, [open, project])
+    return () => {
+      stop = true
+      ctrl.abort()
+      if (streamTimerRef.current != null) { clearTimeout(streamTimerRef.current); streamTimerRef.current = null }
+    }
+  }, [project])
   useEffect(() => {
-    if (!open || !isAbsoluteProject(project)) return
+    if (!isAbsoluteProject(project)) return
     localStorage.setItem(PROJECT_KEY, project)
     let stop = false
+    let inFlight = false
     const tick = async (): Promise<void> => {
+      // in-flight 去重：上一次还没回来就不再发下一次，
+      // 否则慢响应会后到并覆盖更新的板状态（面板显示旧板）
+      if (inFlight) return
+      inFlight = true
       try {
         const r = await fetch(API + '/state?project=' + encodeURIComponent(project))
         const j = await r.json() as Record<string, unknown>
@@ -1055,11 +1134,12 @@ function PaneWindow(): ReturnType<typeof h> | null {
         if (j.ok === true) { setData(j as unknown as BoardData); setErr('') }
         else setErr(String((j.error as { message?: string })?.message ?? '加载失败'))
       } catch (e) { if (!stop) setErr(String(e)) }
+      finally { inFlight = false }
     };
     void tick()
     const t = setInterval(tick, POLL_MS)
     return () => { stop = true; clearInterval(t) }
-  }, [open, project, nonce])
+  }, [project, nonce])
   ensureStyles()
   // 空态一键入口：列出注册表里最近打开过的项目（面板此前只有一个空输入框，用户不知道该填什么）
   useEffect(() => {
@@ -1220,14 +1300,22 @@ function PaneWindow(): ReturnType<typeof h> | null {
     try {
       const r = await fetch(API + '/design?project=' + encodeURIComponent(project) + '&taskId=' + encodeURIComponent(taskId))
       const j = await readJson(r)
+      // 过期响应直接丢弃：请求途中用户可能已经切到别的任务了。迟到的内容落到新任务上，
+      // 再点保存就会把上一个任务写进这个任务的文件（服务端数据损坏）。
+      if (editorIdRef.current !== taskId) return
       if (j.ok !== true) { setDesignMsg('⛔ 读子导图失败：' + errText(j.error)); setDesign(null); return }
       // design 为 null = 这个任务没有子导图（不是错误，显示一句说明即可）
       setDesign(j.design == null ? null : normDesign(j.design))
-    } catch (e) { setDesignMsg('⛔ 读子导图失败：' + String(e)); setDesign(null) }
-    setDesignBusy(false)
+    } catch (e) {
+      if (editorIdRef.current !== taskId) return
+      setDesignMsg('⛔ 读子导图失败：' + String(e)); setDesign(null)
+    }
+    if (editorIdRef.current === taskId) setDesignBusy(false)
   }
   const saveDesign = async (taskId: string): Promise<void> => {
     if (design == null) return
+    // 保存前再核对一次目标就是当前任务：否则会把上一个任务的内容写进这个任务的文件
+    if (editorIdRef.current !== taskId) { setDesignMsg('⛔ 当前任务已经切换，放弃保存（避免写错文件）'); return }
     setDesignBusy(true)
     setDesignMsg('')
     try {
@@ -1499,7 +1587,7 @@ export function apply(ctx: SlotsCtx): void {
       key: PANEL_ID,
       locale: NS,
       inject: () => ({}),
-    }, PaneWindow as unknown as (props: never) => unknown))
+    }, PanelHost as unknown as (props: never) => unknown))
     // 侧栏图标（sidebar.panellist 是 list 槽）：id 必须全宿主唯一，重复会抛
     // "already has an entry with id"；order 11 = 排在引擎(10)后面，别抢位置。
     ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
