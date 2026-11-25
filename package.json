@@ -58,7 +58,8 @@
   },
   "scripts": {
     "build": "pwsh -File scripts/build.ps1",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
+    "typecheck:client": "tsc -p tsconfig.client.json",
     "test": "node scripts/bridge-contract-selftest.mjs",
     "build:client": "tsdown"
   }

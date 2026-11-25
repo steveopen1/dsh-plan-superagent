@@ -433,6 +433,303 @@ function statusMeta(status: string): StatusMeta {
   return { color: STATUS_COLOR.planned, shape: '○', label: '待办' }
 }
 
+/**
+ * ===== 导图拓扑（第 2 轮）=====
+ * 导图要同时说清三件事：层级（模块→任务）、依赖（任务→任务）、状态（谁在做/谁被挡）。
+ */
+interface TopoNode {
+  id: string
+  type: string
+  status: string
+  title: string
+  deps: string[]
+  parent: string | null
+  acceptance?: string[]
+  priority?: number
+}
+
+/** 挡住我的那些前置任务（未完成/未取消的都算挡路）。 */
+function unmetDepsOf(node: TopoNode, byId: Map<string, TopoNode>): string[] {
+  return node.deps.filter(d => {
+    const s = byId.get(d)
+    return s != null && s.status !== 'done' && s.status !== 'canceled'
+  })
+}
+
+/** 聚焦集合：主任务 + 它的上游依赖链（传递闭包）。其余节点只淡出、不隐藏。 */
+function focusChain(nodes: TopoNode[], primaryId: string | null): Set<string> {
+  const out = new Set<string>()
+  if (primaryId == null) return out
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const walk = (id: string): void => {
+    if (out.has(id)) return
+    const n = byId.get(id)
+    if (n == null) return
+    out.add(id)
+    for (const d of n.deps) walk(d)
+  }
+  walk(primaryId)
+  return out
+}
+
+/** 模块进度：完成数 / 总数（折叠时显示「模块名 · 3/5 完成」）。 */
+function moduleProgress(nodes: TopoNode[], moduleId: string): { done: number; total: number } {
+  const kids = nodes.filter(n => n.type === 'task' && n.parent === moduleId)
+  return { done: kids.filter(k => k.status === 'done' || k.status === 'canceled').length, total: kids.length }
+}
+
+/** 下一步可以做什么：ready 且依赖都满足的任务。 */
+function nextSteps(nodes: TopoNode[]): TopoNode[] {
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  return nodes.filter(n => n.type === 'task' && n.status === 'ready' && unmetDepsOf(n, byId).length === 0)
+}
+
+/** 「为什么还没轮到我」：挡住某个任务的前置任务（按拓扑序）。 */
+function blockersOf(nodes: TopoNode[], taskId: string | null, order: Record<string, number>): TopoNode[] {
+  if (taskId == null) return []
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const target = byId.get(taskId)
+  if (target == null) return []
+  return unmetDepsOf(target, byId)
+    .map(id => byId.get(id))
+    .filter((n): n is TopoNode => n != null)
+    .sort((a, b) => (order[a.id] ?? 999) - (order[b.id] ?? 999))
+}
+
+/** 验收标准摘要（第一条 + 剩余条数）。 */
+/** ===== 面板分区（tab）===== */
+type PbTab = 'map' | 'approvals' | 'tasks' | 'events'
+const TAB_ORDER: PbTab[] = ['map', 'approvals', 'tasks', 'events']
+
+/** tab 的标题与计数（计数为 0 时置灰）。 */
+function tabMeta(tab: PbTab, counts: Record<PbTab, number>): { id: PbTab; label: string; count: number } {
+  const labels: Record<PbTab, string> = { map: '导图', approvals: '待批', tasks: '任务', events: '事件' }
+  return { id: tab, label: labels[tab], count: counts[tab] ?? 0 }
+}
+
+/** ←/→ 切 tab（到头就停住，不循环：循环会让"按了没反应"变成"莫名其妙换了页"）。 */
+function nextTab(tab: PbTab, dir: 1 | -1): PbTab {
+  const i = TAB_ORDER.indexOf(tab)
+  const j = i + dir
+  if (j < 0 || j >= TAB_ORDER.length) return tab
+  return TAB_ORDER[j]
+}
+
+/** 数字键 1-4 直达。 */
+function tabByNumber(n: number): PbTab | null {
+  if (!Number.isInteger(n) || n < 1 || n > TAB_ORDER.length) return null
+  return TAB_ORDER[n - 1]
+}
+
+/**
+ * 任务清单：按模块分组，可按 状态 / 优先级 / 依赖 排序。
+ * 排序放在纯函数里（渲染里排序会每次重排，且不好测）。
+ */
+function taskRows(nodes: TopoNode[], order: Record<string, number>, sortBy: 'status' | 'priority' | 'deps'): { moduleId: string | null; moduleTitle: string; tasks: TopoNode[] }[] {
+  const tasks = nodes.filter(n => n.type === 'task')
+  const modules = nodes.filter(n => n.type === 'module')
+  const groups: { moduleId: string | null; moduleTitle: string; tasks: TopoNode[] }[] = modules.map(m => ({
+    moduleId: m.id, moduleTitle: m.title, tasks: tasks.filter(t => t.parent === m.id),
+  }))
+  const loose = tasks.filter(t => t.parent == null || !modules.some(m => m.id === t.parent))
+  if (loose.length > 0) groups.push({ moduleId: null, moduleTitle: '未分组', tasks: loose })
+  const rank: Record<string, number> = { doing: 0, ready: 1, blocked: 2, planned: 3, done: 4, canceled: 5 }
+  for (const g of groups) {
+    g.tasks.sort((a, b) => {
+      if (sortBy === 'priority') return (a.priority ?? 3) - (b.priority ?? 3) || (order[a.id] ?? 999) - (order[b.id] ?? 999)
+      if (sortBy === 'deps') return (b.deps?.length ?? 0) - (a.deps?.length ?? 0) || (order[a.id] ?? 999) - (order[b.id] ?? 999)
+      return (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || (order[a.id] ?? 999) - (order[b.id] ?? 999)
+    })
+  }
+  return groups
+}
+function acceptanceSummary(task: { acceptance?: string[] }): string {
+  const a = task.acceptance ?? []
+  if (a.length === 0) return '（没有写验收标准）'
+  const first = a[0]
+  return a.length > 1 ? first + '（+' + (a.length - 1) + ' 条）' : first
+}
+
+/**
+ * ===== 导图度量与布局（第 3 轮：tidy tree + 画布质感）=====
+ * SVG 里拿不到 CSS 变量，这些常量与第 1 轮的令牌同值（--pb-sp-12 = 12 等）。
+ */
+const MAP = {
+  pad: 12,        // 分组块内边距（--pb-sp-12）
+  gap: 14,        // 任务卡之间的垂直间隙（>= 12，任务别挤成一条线）
+  cardH: 46,      // 任务卡高度（两行文字 + 内边距）
+  cardW: 250,     // 任务卡宽度
+  titleH: 26,     // 模块标题条高度
+  modGap: 34,     // 模块块之间的水平间距
+  rootW: 150,
+  rootH: 38,
+  originX: 28,
+  originY: 24,
+  rootGap: 54,    // 根节点到模块层的距离
+}
+
+interface MapBox { id: string; x: number; y: number; w: number; h: number }
+interface MapGroup { id: string; x: number; y: number; w: number; h: number }
+interface MapLayout {
+  items: MapBox[]
+  groups: MapGroup[]
+  /** 层级边：from = 父（根/模块），to = 子（任务）。 */
+  edges: { from: string; to: string }[]
+  totalW: number
+  totalH: number
+}
+
+/** tidy tree 的节点（w = 自身宽度；children 参与子树宽度计算）。 */
+interface TidyNode { id: string; w: number; children: TidyNode[]; subtreeW?: number }
+
+/**
+ * tidy tree（Reingold–Tilford 的简化版，d3-hierarchy 的核心思路）：
+ * ① 后序遍历算出每棵子树的宽度（子宽度之和 + 兄弟间距，且不小于自身宽度）；
+ * ② 前序遍历按宽度切分横轴，**父节点取子节点区间的中点** → 父居中、兄弟等距、子树不重叠。
+ * 不引 d3：自己写这 60 行就够，还能避免把 React 18 的 bundle 拖进依赖。
+ */
+function tidyTree(root: TidyNode, gapX: number): Map<string, { x: number; width: number }> {
+  const measure = (n: TidyNode): number => {
+    if (n.children.length === 0) { n.subtreeW = n.w; return n.w }
+    let total = 0
+    for (const c of n.children) total += measure(c) + gapX
+    n.subtreeW = Math.max(n.w, total - gapX)
+    return n.subtreeW
+  }
+  const out = new Map<string, { x: number; width: number }>()
+  const place = (n: TidyNode, left: number): void => {
+    const width = n.subtreeW ?? n.w
+    out.set(n.id, { x: left + width / 2, width })
+    let cursor = left
+    for (const c of n.children) { place(c, cursor); cursor += (c.subtreeW ?? c.w) + gapX }
+    // 父节点取**第一个与最后一个子节点的中点**（经典 tidy tree）：子树的宽度可以不同，
+    // 按"自己占的那段"居中会让父节点偏离孩子的中线，看着歪。
+    if (n.children.length === 1) {
+      out.set(n.id, { x: out.get(n.children[0].id)!.x, width })
+    } else if (n.children.length > 1) {
+      const first = out.get(n.children[0].id)!.x
+      const last = out.get(n.children[n.children.length - 1].id)!.x
+      out.set(n.id, { x: (first + last) / 2, width })
+    }
+  }
+  measure(root)
+  place(root, 0)
+  return out
+}
+
+/**
+ * 分层树布局：
+ *  - 模块层用 tidy tree 横向排开（父=计划名居中于所有模块之上）；
+ *  - 每个模块是一个圆角分组块，任务卡在块内纵向堆叠（多的时候两列），模块标题居中于自己的任务组。
+ */
+function layoutMap(nodes: { id: string; type: string; title: string; parent: string | null; pos?: { x: number; y: number } | null }[], folded: Record<string, boolean>): MapLayout {
+  const items: MapBox[] = []
+  const groups: MapGroup[] = []
+  const edges: { from: string; to: string }[] = []
+  const modules = nodes.filter(n => n.type === 'module')
+
+  // 1) 每个模块块：先把任务卡在块内排好，得出块宽/块高
+  const blockOf = new Map<string, { w: number; h: number; tasks: { id: string; x: number; y: number }[] }>()
+  for (const m of modules) {
+    const kids = folded[m.id] === true ? [] : nodes.filter(n => n.type === 'task' && n.parent === m.id)
+    const cols = kids.length > 3 ? 2 : 1
+    const rows = Math.max(1, Math.ceil(kids.length / cols))
+    const innerW = cols === 1 ? MAP.cardW : MAP.cardW * cols + MAP.gap * (cols - 1)
+    const w = innerW + MAP.pad * 2
+    const h = MAP.pad + MAP.titleH + rows * MAP.cardH + Math.max(0, rows - 1) * MAP.gap + MAP.pad
+    const tasks = kids.map((t, i) => {
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      return { id: t.id, x: MAP.pad + col * (MAP.cardW + MAP.gap), y: MAP.pad + MAP.titleH + row * (MAP.cardH + MAP.gap) }
+    })
+    blockOf.set(m.id, { w, h, tasks })
+  }
+
+  // 2) 模块层交给 tidy tree（叶子 = 模块块）
+  const tidyRoot: TidyNode = {
+    id: '__root__',
+    w: MAP.rootW,
+    children: modules.map(m => ({ id: m.id, w: blockOf.get(m.id)?.w ?? MAP.cardW, children: [] })),
+  }
+  const places = tidyTree(tidyRoot, MAP.modGap)
+  const rootPlace = places.get('__root__')
+  const rootX = MAP.originX + (rootPlace?.x ?? 0)
+  const rootY = MAP.originY
+  const moduleY = rootY + MAP.rootH + MAP.rootGap
+
+  items.push({ id: '__root__', x: rootX, y: rootY, w: MAP.rootW, h: MAP.rootH })
+  for (const m of modules) {
+    const blk = blockOf.get(m.id)
+    if (blk == null) continue
+    const place = places.get(m.id)
+    const bx = MAP.originX + (place?.x ?? 0)
+    // 模块标题：水平居中于自己的任务组（父在子上居中）
+    const titleW = 190
+    items.push({ id: m.id, x: bx + (blk.w - titleW) / 2, y: moduleY + MAP.pad, w: titleW, h: MAP.titleH })
+    groups.push({ id: m.id, x: bx, y: moduleY, w: blk.w, h: blk.h })
+    for (const t of blk.tasks) {
+      items.push({ id: t.id, x: bx + t.x, y: moduleY + t.y, w: MAP.cardW, h: MAP.cardH })
+    }
+    edges.push({ from: '__root__', to: m.id })
+    for (const t of blk.tasks) edges.push({ from: m.id, to: t.id })
+  }
+
+  // 3) 手动拖过的节点保持自己的位置（不参与自动排布）
+  let maxX = 0, maxY = 0
+  for (const it of items) { maxX = Math.max(maxX, it.x + it.w); maxY = Math.max(maxY, it.y + it.h) }
+  for (const n of nodes) {
+    if (n.pos == null) continue
+    const box = items.find(i => i.id === n.id)
+    if (box == null) continue
+    box.x = n.pos.x
+    box.y = n.pos.y
+    maxX = Math.max(maxX, box.x + box.w)
+    maxY = Math.max(maxY, box.y + box.h)
+  }
+  return { items, groups, edges, totalW: maxX + MAP.originX, totalH: maxY + MAP.originX }
+}
+
+/** 层级边：父底部 → 子顶部的平滑 S 曲线（近父略粗、末端渐细用渐变近似）。 */
+function hierarchyPath(from: MapBox, to: MapBox): string {
+  const x1 = from.x + from.w / 2, y1 = from.y + from.h
+  const x2 = to.x + to.w / 2, y2 = to.y
+  const dy = Math.max(20, (y2 - y1) / 2)
+  return 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + dy) + ' ' + x2 + ' ' + (y2 - dy) + ' ' + x2 + ' ' + y2
+}
+
+/**
+ * 依赖边：绕到卡片左侧的圆角折线（不穿过卡片）。
+ * 直走会从卡片中间穿过去，看着像一团乱麻；绕左侧 + 圆角更像"关系线"。
+ */
+function dependencyPath(from: MapBox, to: MapBox): string {
+  const sx = from.x, sy = from.y + from.h / 2
+  const tx = to.x, ty = to.y + to.h / 2
+  const r = 10
+  const out = 30
+  const dir = ty >= sy ? 1 : -1
+  const lx = sx - out
+  return 'M ' + sx + ' ' + sy
+    + ' H ' + (lx + r)
+    + ' Q ' + lx + ' ' + sy + ' ' + lx + ' ' + (sy + dir * r)
+    + ' V ' + (ty - dir * r)
+    + ' Q ' + lx + ' ' + ty + ' ' + (lx + r) + ' ' + ty
+    + ' H ' + tx
+}
+
+/** 一键适应画布：缩放 + 居中（用户不用拿滚轮硬调）。 */
+function fitView(layout: { items: MapBox[] }, box: { w: number; h: number }, pad = 24): { k: number; tx: number; ty: number } {
+  if (layout.items.length === 0 || box.w <= 0 || box.h <= 0) return { k: 1, tx: 0, ty: 0 }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const i of layout.items) {
+    minX = Math.min(minX, i.x); minY = Math.min(minY, i.y)
+    maxX = Math.max(maxX, i.x + i.w); maxY = Math.max(maxY, i.y + i.h)
+  }
+  const cw = Math.max(1, maxX - minX)
+  const ch = Math.max(1, maxY - minY)
+  const k = Math.min(1.6, Math.max(0.35, Math.min((box.w - pad * 2) / cw, (box.h - pad * 2) / ch)))
+  return { k, tx: (box.w - cw * k) / 2 - minX * k, ty: (box.h - ch * k) / 2 - minY * k }
+}
+
 /** ===== 聚焦卡：算出「现在该做什么」 ===== */
 interface FocusNode { id: string; type: string; status: string; title: string; deps: string[] }
 interface FocusPick {
@@ -558,7 +855,7 @@ const CSS = [
   '.pb-station{animation:pb-pulse 1.6s ease-in-out infinite}',
   '@keyframes pb-pulse{0%,100%{opacity:.35}50%{opacity:1}}',
   // flex:0 0 auto —— 面板 body 是 flex column，导图必须拒绝被编辑卡挤扁（M2-3 验收 P1 修复）
-  '.pb-map{flex:0 0 auto;background:var(--pb-card);border:1px solid var(--pb-line);border-radius:12px;overflow:hidden;cursor:grab}',
+  '.pb-map{flex:0 0 auto;position:relative;background:var(--pb-card);border:1px solid var(--pb-line);border-radius:12px;overflow:hidden;cursor:grab}',
   '.pb-map text{font-family:ui-sans-serif,system-ui,sans-serif;fill:var(--pb-ink,#0f172a)}',
   '.pb-node{cursor:grab}',
   '.pb-node.pb-dragging{cursor:grabbing}',
@@ -628,6 +925,50 @@ const CSS = [
   '.pb-deps{display:flex;flex-direction:column;gap:2px;max-height:150px;overflow:auto;border:1px solid var(--pb-line);border-radius:6px;padding:4px;background:var(--pb-bg)}',
   '.pb-deps .pb-deprow{font-size:var(--pb-fs-11)}',
   '.pb-cycle{font-size:var(--pb-fs-11);font-weight:700;color:#ef4444;line-height:1.5}',
+  // ===== 第 4 轮：tab 化 =====
+  '.pb-tabs{display:flex;gap:var(--pb-sp-4);align-items:stretch;padding:0 var(--pb-sp-16);border-bottom:1px solid var(--pb-line);background:var(--pb-card);position:sticky;top:0;z-index:4;overflow-x:auto}',
+  '.pb-tab{display:inline-flex;align-items:center;gap:var(--pb-sp-4);cursor:pointer;padding:var(--pb-sp-8) var(--pb-sp-12);border:none;background:transparent;color:var(--pb-muted);font-size:var(--pb-fs-13);font-weight:600;border-bottom:2px solid transparent;white-space:nowrap}',
+  '.pb-tab:hover{color:var(--pb-ink)}',
+  '.pb-tab-on{color:var(--pb-ink);border-bottom-color:#8b5cf6}',
+  '.pb-tab:focus-visible{outline:2px solid #8b5cf6;outline-offset:-2px;border-radius:var(--pb-r-6)}',
+  '.pb-badge-dim{opacity:.45}',
+  '.pb-tabbody{padding:var(--pb-sp-12) var(--pb-sp-16);display:flex;flex-direction:column;gap:var(--pb-sp-12);flex:1;min-height:0;overflow:auto}',
+  '.pb-tablist{display:flex;flex-direction:column;gap:var(--pb-sp-8)}',
+  '.pb-tasks{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--pb-sp-12);align-items:start}',
+  '.pb-tasklist{display:flex;flex-direction:column;gap:var(--pb-sp-8);min-width:0}',
+  '.pb-tasklist-head{display:flex;align-items:center;gap:var(--pb-sp-8);justify-content:space-between}',
+  '.pb-sortbar{display:flex;gap:var(--pb-sp-4)}',
+  '.pb-canvasbtn-on{border-color:#8b5cf6;color:#7c3aed;background:rgba(139,92,246,.12)}',
+  '.pb-taskgroup{display:flex;flex-direction:column;gap:var(--pb-sp-4);margin-bottom:var(--pb-sp-8)}',
+  '.pb-taskgroup-title{font-size:var(--pb-fs-12);font-weight:700;color:var(--pb-muted);letter-spacing:.3px}',
+  '.pb-taskrow{display:flex;align-items:center;gap:var(--pb-sp-8);cursor:pointer;text-align:left;width:100%;padding:var(--pb-sp-8) var(--pb-sp-12);border-radius:var(--pb-r-8);border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-ink);font-size:var(--pb-fs-13)}',
+  '.pb-taskrow:hover{background:rgba(139,92,246,.08);border-color:rgba(139,92,246,.45)}',
+  '.pb-taskrow-on{border-color:#8b5cf6;box-shadow:0 0 0 1px rgba(139,92,246,.4)}',
+  '.pb-taskrow-id{font-size:var(--pb-fs-11);color:var(--pb-muted);flex:none}',
+  '.pb-taskrow-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.pb-taskrow-meta{font-size:var(--pb-fs-11);color:var(--pb-muted);flex:none}',
+  '.pb-taskedit{min-width:0;position:sticky;top:var(--pb-sp-12)}',
+  '.pb-emptycanvas{display:flex;flex-direction:column;align-items:center;gap:var(--pb-sp-8);padding:var(--pb-sp-24);color:var(--pb-muted);text-align:center}',
+  // ===== 第 3 轮：画布质感（卡片/分组块/曲线边/工具条/点阵）=====
+  '.pb-map{background-image:radial-gradient(circle,rgba(100,116,139,.16) 1px,transparent 1px);background-size:16px 16px;background-repeat:repeat;transition:none}',
+  '.pb-group{fill:rgba(100,116,139,.05);stroke:var(--pb-line,#e2e8f0);stroke-width:1}',
+  '.pb-cardnode{filter:drop-shadow(0 1px 2px rgba(15,23,42,.05));transition:filter .15s ease,transform .15s ease}',
+  '.pb-node:hover .pb-cardnode{filter:drop-shadow(0 6px 14px rgba(15,23,42,.12));transform:translateY(-1px)}',
+  '.pb-node-ring{filter:drop-shadow(0 4px 12px rgba(124,58,237,.25))}',
+  '.pb-cardtitle{font-family:ui-sans-serif,system-ui,sans-serif}',
+  '.pb-monoid{font-family:ui-monospace,monospace}',
+  '.pb-edge{stroke:url(#pb-edge-grad);stroke-width:1.6;fill:none}',
+  '.pb-edge-on{stroke:url(#pb-edge-grad-on);stroke-width:2.4}',
+  '.pb-depedge{stroke-dasharray:5 4}',
+  '.pb-blockpill{filter:drop-shadow(0 2px 6px rgba(239,68,68,.30))}',
+  '.pb-canvasbar{position:absolute;display:flex;align-items:center;gap:var(--pb-sp-4);z-index:3}',
+  '.pb-canvasbar-tl{left:var(--pb-sp-8);top:var(--pb-sp-8)}',
+  '.pb-canvasbar-bl{left:var(--pb-sp-8);bottom:var(--pb-sp-8)}',
+  '.pb-canvasbar-tr{right:var(--pb-sp-8);top:var(--pb-sp-8)}',
+  '.pb-canvasbtn{cursor:pointer;padding:2px var(--pb-sp-8);border-radius:999px;font-size:var(--pb-fs-11);font-weight:600;border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-muted);white-space:nowrap}',
+  '.pb-canvasbtn:hover{color:var(--pb-ink);border-color:rgba(139,92,246,.5)}',
+  '.pb-zoomval{font-size:var(--pb-fs-11);color:var(--pb-muted);min-width:34px;text-align:center;font-variant-numeric:tabular-nums}',
+  '.pb-legend{position:static;display:inline-flex;gap:var(--pb-sp-8);align-items:center;padding:2px var(--pb-sp-8);border-radius:999px;border:1px solid var(--pb-line);background:var(--pb-card);font-size:var(--pb-fs-11);color:var(--pb-muted);pointer-events:none}',
   // ===== 新版式：顶栏 / 聚焦卡 / 分区 / 空态 / 骨架 / 状态徽标 =====
   '.pb-topbar{display:flex;flex-direction:column;gap:var(--pb-sp-8);padding:var(--pb-sp-12) var(--pb-sp-16);border-bottom:1px solid var(--pb-line);background:var(--pb-card)}',
   '.pb-topbar-row{display:flex;align-items:center;gap:var(--pb-sp-8);flex-wrap:wrap}',
@@ -643,15 +984,8 @@ const CSS = [
   '.pb-focus-hint{font-size:var(--pb-fs-12);color:var(--pb-muted);line-height:1.6}',
   '.pb-status{display:inline-flex;align-items:center;gap:var(--pb-sp-4);font-size:var(--pb-fs-11);font-weight:700;padding:2px var(--pb-sp-8);border-radius:999px;border:1px solid currentColor;background:rgba(100,116,139,.10)}',
   '.pb-status-shape{font-size:var(--pb-fs-12);line-height:1}',
-  '.pb-zone{margin:0 var(--pb-sp-16) var(--pb-sp-12)}',
-  '.pb-zonehead{display:flex;align-items:center;gap:var(--pb-sp-8);width:100%;text-align:left;cursor:pointer;padding:var(--pb-sp-8) var(--pb-sp-12);border:1px solid var(--pb-line);border-radius:var(--pb-r-8);background:var(--pb-card);color:var(--pb-ink);font-size:var(--pb-fs-13);font-weight:700}',
-  '.pb-zonehead:hover{background:rgba(139,92,246,.08)}',
-  '.pb-zonehead:active{transform:translateY(1px)}',
-  '.pb-zone-caret{color:var(--pb-muted);font-size:var(--pb-fs-12)}',
-  '.pb-zone-title{flex:1}',
   '.pb-badge{font-size:var(--pb-fs-11);font-weight:700;padding:1px var(--pb-sp-8);border-radius:999px;background:rgba(139,92,246,.14);color:#7c3aed}',
   '[data-mode="dark"] .pb-badge{color:#a78bfa}',
-  '.pb-zonebody{margin-top:var(--pb-sp-8);display:flex;flex-direction:column;gap:var(--pb-sp-8)}',
   '.pb-empty{display:flex;flex-direction:column;gap:var(--pb-sp-4);padding:var(--pb-sp-16);border:1px dashed var(--pb-line);border-radius:var(--pb-r-8);background:rgba(100,116,139,.05)}',
   '.pb-empty-title{font-size:var(--pb-fs-15);font-weight:700}',
   '.pb-empty-hint{font-size:var(--pb-fs-13);color:var(--pb-muted);line-height:1.6}',
@@ -662,6 +996,21 @@ const CSS = [
   '.pb-errbar{display:flex;align-items:center;gap:var(--pb-sp-8);margin:var(--pb-sp-12) var(--pb-sp-16) 0;padding:var(--pb-sp-8) var(--pb-sp-12);border:1px solid rgba(239,68,68,.5);border-radius:var(--pb-r-8);background:rgba(239,68,68,.10);font-size:var(--pb-fs-13);color:#b91c1c}',
   '[data-mode="dark"] .pb-errbar{color:#fca5a5}',
   '.pb-kbd{font:11px/1.4 ui-monospace,monospace;padding:1px 5px;border:1px solid var(--pb-line);border-bottom-width:2px;border-radius:var(--pb-r-6);background:var(--pb-bg);color:var(--pb-muted)}',
+  // ===== 第 2 轮：图例 / 角标 / 折叠 / 下一步清单 =====
+  '.pb-legend{position:absolute;right:8px;top:8px;display:flex;gap:8px;align-items:center;padding:3px 8px;border-radius:var(--pb-r-8);border:1px solid var(--pb-line);background:rgba(255,255,255,.86);font-size:10px;color:var(--pb-muted);pointer-events:none;z-index:2}',
+  '.pb-legend-item{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}',
+  '.pb-legend-shape{font-size:11px;line-height:1}',
+  '.pb-fold{cursor:pointer}',
+  '.pb-focus-id{font:11px/1.4 ui-monospace,monospace;color:var(--pb-muted);padding:1px 6px;border-radius:var(--pb-r-6);background:rgba(100,116,139,.12)}',
+  '.pb-focus-detail{font-size:var(--pb-fs-12);color:var(--pb-ink);line-height:1.6}',
+  '.pb-focus-sub{display:block;font-size:var(--pb-fs-11);font-weight:700;color:var(--pb-muted);margin-bottom:var(--pb-sp-4)}',
+  '.pb-focus-blocked{margin-top:var(--pb-sp-8)}',
+  '.pb-focus-blocked-list{display:flex;flex-wrap:wrap;gap:var(--pb-sp-4)}',
+  '.pb-focus-blocked-item{display:inline-flex;align-items:center;gap:var(--pb-sp-4);font-size:var(--pb-fs-12);color:var(--pb-ink)}',
+  '.pb-next{margin-top:var(--pb-sp-8)}',
+  '.pb-next-list{display:flex;flex-direction:column;gap:var(--pb-sp-4)}',
+  '.pb-next-item{display:flex;align-items:center;gap:var(--pb-sp-8);cursor:pointer;text-align:left;padding:var(--pb-sp-4) var(--pb-sp-8);border-radius:var(--pb-r-6);border:1px solid var(--pb-line);background:var(--pb-bg);color:var(--pb-ink);font-size:var(--pb-fs-12)}',
+  '.pb-next-item:hover{background:rgba(139,92,246,.10);border-color:rgba(139,92,246,.5)}',
   // 崩溃面：宿主那道边界只会留空 div，这里自己给一句人话 + 一个重载按钮
   '.pb-crash{padding:14px;border:1px solid rgba(239,68,68,.5);border-radius:10px;background:rgba(239,68,68,.08);display:flex;flex-direction:column;gap:8px;font-size:var(--pb-fs-12);color:inherit}',
   '.pb-crash-title{font-weight:700;color:#ef4444;font-size:var(--pb-fs-13)}',
@@ -716,12 +1065,11 @@ function hasCycle(nodes: { id: string; deps: string[] }[]): boolean {
   return false
 }
 
-interface LayoutItem { node: BoardNode; x: number; y: number; w: number; h: number }
-interface Layout { items: LayoutItem[]; totalH: number }
+
 interface MapProps {
   data: BoardData
   effNodes: BoardNode[]
-  layout: Layout
+  layout: MapLayout
   dirtyIds: Set<string>
   view: { k: number; tx: number; ty: number }
   setView: (f: (v: { k: number; tx: number; ty: number }) => { k: number; tx: number; ty: number }) => void
@@ -735,39 +1083,46 @@ interface MapProps {
   onDepDrop: (from: string, at: { clientX: number; clientY: number }) => void
   onHandlePointerDown: (e: PEv, id: string) => void
   svgRef: RefObject<SVGSVGElement | null>
+  /** 第 2 轮：模块折叠状态（moduleId -> 是否折叠）。 */
+  folded: Record<string, boolean>
+  /** 第 2 轮：聚焦集合（主任务 + 上游依赖链）；其余节点淡出但仍可见。 */
+  focusIds: Set<string>
+  /** 第 2 轮：挡住每个任务的前置任务 id。 */
+  blockers: Record<string, string[]>
+  /** 第 2 轮：折叠/展开某个模块。 */
+  onToggleModule: (id: string) => void
+  /** 第 3 轮：折叠/展开全部模块。 */
+  onFoldAll: (folded: boolean) => void
 }
 
 const ROW = 30
 const MOD_H = 42
 
 function MindMap(props: MapProps): ReturnType<typeof h> {
-  const { data, effNodes, layout, dirtyIds, view, setView, dragRef, depLine, setDepLine, editorId, onNodePointerDown, onNodeMove, onNodeClick, onDepDrop, onHandlePointerDown, svgRef } = props
-  const drag = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null)
+  const { data, effNodes, layout, dirtyIds, view, setView, dragRef, depLine, setDepLine, editorId, onNodePointerDown, onNodeMove, onNodeClick, onDepDrop, onHandlePointerDown, svgRef, folded, focusIds, blockers, onToggleModule, onFoldAll } = props
   const b = data.board
-  const mods = useMemo(() => effNodes.filter(n => n.type === 'module'), [effNodes])
-  const posOf = (id: string): LayoutItem | undefined => layout.items.find(i => i.node.id === id)
+  const drag = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null)
+  const mapRef = useRef<HTMLDivElement | null>(null)
+  const [legendOpen, setLegendOpen] = useState(false)
+  // 聚焦集合为空 = 没人在做（不淡出任何节点）；有则集合外的淡出但仍可见（要看得出全局）
+  const dimOpacity = (id: string): number => (focusIds.size === 0 ? 1 : (focusIds.has(id) ? 1 : .3))
+  const boxOf = (id: string): MapBox | undefined => layout.items.find(i => i.id === id)
+  const nodeOf = (id: string): BoardNode | undefined => effNodes.find(n => n.id === id)
   const toSvg = (clientX: number, clientY: number): { x: number; y: number } => {
     const rect = svgRef.current?.getBoundingClientRect()
     const left = rect?.left ?? 0
     const top = rect?.top ?? 0
     return { x: (clientX - left - view.tx) / view.k, y: (clientY - top - view.ty) / view.k }
   };
-  const edge = (a: LayoutItem, bx: number, by: number): string => {
-    const x1 = a.x + a.w
-    const y1 = a.y + a.h / 2
-    const mx = (x1 + bx) / 2
-    return 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + by + ', ' + bx + ' ' + by
-  };
-  const depEdge = (a: LayoutItem, bp: LayoutItem): string => {
-    const x1 = a.x - 6
-    const y1 = a.y + a.h / 2
-    const x2 = bp.x - 6
-    const y2 = bp.y + bp.h / 2
-    const mx = Math.min(x1, x2) - 46
-    return 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + y2 + ', ' + x2 + ' ' + y2
-  };
-  // 原生非 passive 监听器：React 合成 onWheel 走根节点 passive 注册，preventDefault 无效且报错（M2-3 验收 P2 修复）
-  const mapRef = useRef<HTMLDivElement | null>(null)
+  // 缩放/适应：用户不用拿滚轮硬调
+  const zoomBy = (f: number): void => { setView(v => ({ ...v, k: Math.min(2.2, Math.max(0.35, v.k * f)) })) }
+  const doFit = (): void => {
+    const el = mapRef.current
+    if (el == null) return
+    const v = fitView(layout, { w: el.clientWidth, h: el.clientHeight })
+    setView(() => ({ k: v.k, tx: v.tx, ty: v.ty }))
+  }
+  // 原生非 passive 监听器：React 合成 onWheel 走根节点 passive 注册，preventDefault 无效且报错
   useEffect(() => {
     const el = mapRef.current
     if (el == null) return
@@ -784,13 +1139,9 @@ function MindMap(props: MapProps): ReturnType<typeof h> {
   return h('div', {
     className: 'pb-map',
     ref: mapRef,
-    onPointerDown: (e: PEv) => {
-      if (dragRef.current != null) return
-      drag.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty }
-      // 指针捕获在指针已失效时会抛：React 18 里事件处理器的未捕获异常会卸载整棵树（整页白）。
-      // 失败就当没捕获到，继续用普通事件（跟节点那条路径一个写法）。
-      try { (e.target as Element).setPointerCapture?.(e.pointerId) } catch { /* 没捕获到也能拖 */ }
-    },
+    // 点阵网格跟随平移（专业感全靠它）
+    style: { backgroundPosition: (view.tx % 16) + 'px ' + (view.ty % 16) + 'px' },
+    onPointerDown: (e: PEv) => { if (dragRef.current != null) return; drag.current = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty }; (e.target as Element).setPointerCapture?.(e.pointerId) },
     onPointerMove: (e: PEv) => {
       const d = dragRef.current
       if (d != null && d.kind === 'node') {
@@ -801,12 +1152,10 @@ function MindMap(props: MapProps): ReturnType<typeof h> {
       }
       if (d != null && d.kind === 'dep') {
         const p = toSvg(e.clientX, e.clientY)
-        const f = posOf(d.from)
+        const f = boxOf(d.from)
         if (f != null) setDepLine({ x1: f.x + f.w, y1: f.y + f.h / 2, x2: p.x, y2: p.y })
         return
       }
-      // 先把 ref 读成局部常量：setView 的 updater 是渲染期才执行的，
-      // 那时 pointerup 可能已经把 drag.current 清空 —— 读 ref 就会抛（面板整块空白）。
       const base = drag.current
       if (base == null) return
       setView(v => ({ ...v, tx: base.tx + (e.clientX - base.x), ty: base.ty + (e.clientY - base.y) }))
@@ -815,76 +1164,156 @@ function MindMap(props: MapProps): ReturnType<typeof h> {
       const d = dragRef.current
       dragRef.current = null
       setDepLine(null)
-      // 画布拖拽状态无条件清：节点/连线分支原来提前 return，状态会粘住 → 鼠标一动画布自己跑
       drag.current = null
       if (d != null && d.kind === 'node') { if (!d.moved) onNodeClick(d.id); return }
       if (d != null && d.kind === 'dep') { onDepDrop(d.from, { clientX: e.clientX, clientY: e.clientY }); return }
     },
-    // 取消类事件（指针被系统取消 / 移出容器 / 捕获丢失）：统一清拖拽状态。
-    // 不清的话下一次 pointermove 会继续按"还在拖"处理 → 画布自己跑、节点自己跟。
     onPointerCancel: () => { drag.current = null; dragRef.current = null; setDepLine(null) },
     onPointerLeave: () => { drag.current = null; dragRef.current = null; setDepLine(null) },
     onLostPointerCapture: () => { drag.current = null; dragRef.current = null; setDepLine(null) },
+    // 空白处双击 = 适应画布（点在节点上不算）
+    onDoubleClick: (e: PEv) => {
+      const el = e.target as Element
+      if (el.closest('.pb-node') != null) return
+      doFit()
+    },
   },
-    h('svg', { width: '100%', height: Math.max(layout.totalH, 300), ref: svgRef, key: b.version },
+    h('svg', { width: '100%', height: Math.max(layout.totalH, 320), ref: svgRef, key: b.version },
+      h('defs', {},
+        // 层级边渐变：近父浓、末端淡（"呼吸感"的关键）
+        h('linearGradient', { key: 'g1', id: 'pb-edge-grad', x1: '0', y1: '0', x2: '0', y2: '1' },
+          h('stop', { key: 's1', offset: '0%', style: { stopColor: 'var(--pb-line)', stopOpacity: '.95' } }),
+          h('stop', { key: 's2', offset: '100%', style: { stopColor: 'var(--pb-line)', stopOpacity: '.2' } })),
+        h('linearGradient', { key: 'g2', id: 'pb-edge-grad-on', x1: '0', y1: '0', x2: '0', y2: '1' },
+          h('stop', { key: 's3', offset: '0%', style: { stopColor: '#8b5cf6', stopOpacity: '1' } }),
+          h('stop', { key: 's4', offset: '100%', style: { stopColor: '#8b5cf6', stopOpacity: '.3' } }))),
       h('g', { transform: 'translate(' + view.tx + ',' + view.ty + ') scale(' + view.k + ')' },
-        effNodes.filter(n => n.type === 'module' && n.parent == null).map((m, i) => {
-          const rp = posOf('__root__')
-          const mp = posOf(m.id)
-          if (rp == null || mp == null) return null
-          return h('path', { key: 'e' + i, d: edge(rp, mp.x, mp.y + mp.h / 2), stroke: 'var(--pb-line,#cbd5e1)', strokeWidth: 1.6, fill: 'none' })
+        // ===== 模块分组块（容器，不是方框）=====
+        layout.groups.map(g => h('rect', { key: 'grp' + g.id, className: 'pb-group', x: g.x, y: g.y, width: g.w, height: g.h, rx: 14 })),
+        // ===== 层级边：平滑 S 曲线，默认很淡，聚焦链才提亮 =====
+        layout.edges.map((e, i) => {
+          const from = boxOf(e.from)
+          const to = boxOf(e.to)
+          if (from == null || to == null) return null
+          const on = focusIds.size > 0 && focusIds.has(e.to) && focusIds.has(e.from)
+          return h('path', { key: 'e' + i, className: 'pb-edge' + (on ? ' pb-edge-on' : ''), d: hierarchyPath(from, to), fill: 'none' })
         }),
-        mods.map((m, mi) => {
-          const mp = posOf(m.id)
-          if (mp == null) return null
-          return h('g', { key: 'mg' + mi },
-            effNodes.filter(t => t.type === 'task' && t.parent === m.id).map((t, ti) => {
-              const tp = posOf(t.id)
-              if (tp == null) return null
-              return h('path', { key: 'te' + mi + '_' + ti, d: edge(mp, tp.x, tp.y + tp.h / 2), stroke: 'var(--pb-line,#cbd5e1)', strokeWidth: 1.2, fill: 'none' })
-            }))
-        }),
+        // ===== 依赖边：圆角折线绕开卡片；挡路的加粗标红 =====
         effNodes.flatMap((t, di) => (t.deps ?? []).map((d, dj) => {
-          const a = posOf(t.id)
-          const bp = posOf(d)
-          if (a == null || bp == null) return null
-          return h('path', { key: 'dep' + di + '_' + dj, d: depEdge(bp, a), stroke: '#8b5cf6', strokeWidth: 1.3, strokeDasharray: '5 4', fill: 'none', opacity: .8 })
+          const from = boxOf(d)
+          const to = boxOf(t.id)
+          if (from == null || to == null) return null
+          const dep = nodeOf(d)
+          const depColor = STATUS_COLOR[dep?.status ?? 'planned'] ?? '#94a3b8'
+          const blocking = (blockers[t.id] ?? []).includes(d)
+          const on = focusIds.size > 0 && focusIds.has(t.id) && focusIds.has(d)
+          const op = focusIds.size === 0 ? .7 : (on || blocking ? .95 : .18)
+          const stroke = blocking ? '#ef4444' : depColor
+          const tipX = to.x, tipY = to.y + to.h / 2
+          return h('g', { key: 'dep' + di + '_' + dj, opacity: op },
+            h('path', { className: 'pb-depedge', d: dependencyPath(from, to), stroke, strokeWidth: blocking ? 2 : 1.4, fill: 'none' }),
+            h('path', { d: 'M ' + tipX + ' ' + tipY + ' l -7 -4 l 0 8 z', fill: stroke, stroke: 'none' }))
         })),
         depLine != null ? h('line', { x1: depLine.x1, y1: depLine.y1, x2: depLine.x2, y2: depLine.y2, stroke: '#8b5cf6', strokeWidth: 2, strokeDasharray: '4 3', opacity: .9 }) : null,
-        layout.items.map((it, ii) => {
-          const isRoot = it.node.id === '__root__'
-          const color = STATUS_COLOR[it.node.status] ?? '#94a3b8'
-          const ord = data.order[it.node.id]
-          const isStation = it.node.id === data.station
-          const isEditor = it.node.id === editorId
-          const isDirty = dirtyIds.has(it.node.id)
+        // ===== 节点 =====
+        layout.items.map((bx, ii) => {
+          const n = nodeOf(bx.id)
+          const isRoot = bx.id === '__root__'
+          const meta = statusMeta(n?.status ?? 'planned')
+          const color = meta.color
+          const ord = data.order[bx.id]
+          const isStation = bx.id === data.station
+          const isEditor = bx.id === editorId
+          const isDirty = dirtyIds.has(bx.id)
+          const op = dimOpacity(bx.id)
+          const blockedBy = blockers[bx.id] ?? []
+          const isModule = n != null && n.type === 'module'
+          const prog = isModule ? moduleProgress(effNodes as unknown as TopoNode[], bx.id) : null
+          const title = isRoot ? (b?.plan.name ?? 'Plan') : (n?.title ?? bx.id)
           if (isRoot) {
-            return h('g', { key: 'n' + ii },
-              h('rect', { x: it.x, y: it.y, width: it.w, height: it.h, rx: 12, fill: 'var(--pb-bg)', stroke: color, strokeWidth: 2 }),
-              h('rect', { x: it.x, y: it.y, width: 4, height: it.h, rx: 2, fill: color }),
-              h('text', { x: it.x + 12, y: it.y + it.h / 2 + 4, fontSize: 13, fontWeight: 600 }, it.node.title.slice(0, 26)));
+            return h('g', { key: 'n' + ii, className: 'pb-node', opacity: op },
+              h('rect', { className: 'pb-cardnode', x: bx.x, y: bx.y, width: bx.w, height: bx.h, rx: 10, fill: 'var(--pb-card)', stroke: 'var(--pb-line)', strokeWidth: 1 }),
+              h('rect', { x: bx.x + 12, y: bx.y + 10, width: 4, height: bx.h - 20, rx: 2, fill: color }),
+              h('text', { className: 'pb-cardtitle', x: bx.x + 24, y: bx.y + 24, fontSize: 13, fontWeight: 600 }, title.slice(0, 16)))
           }
+          if (isModule) {
+            return h('g', {
+              key: 'n' + bx.id,
+              className: 'pb-node',
+              'data-id': bx.id,
+              opacity: op,
+              onPointerDown: (e: PEv) => { e.stopPropagation(); onNodePointerDown(e, bx.id, { x: bx.x, y: bx.y }) },
+            },
+              h('rect', { x: bx.x, y: bx.y, width: bx.w, height: bx.h, fill: 'transparent' }),
+              h('text', { className: 'pb-cardtitle', x: bx.x + bx.w / 2, y: bx.y + 18, fontSize: 13, fontWeight: 600, textAnchor: 'middle', fill: 'var(--pb-ink,#0f172a)' }, title.slice(0, 18)),
+              prog != null && prog.total > 0 ? h('text', { x: bx.x + bx.w - 26, y: bx.y + 18, fontSize: 11, textAnchor: 'end', fill: 'var(--pb-muted,#64748b)' }, prog.done + '/' + prog.total) : null,
+              h('g', {
+                className: 'pb-fold',
+                onPointerDown: (e: PEv) => { e.stopPropagation() },
+                onClick: (e: { stopPropagation: () => void }) => { e.stopPropagation(); onToggleModule(bx.id) },
+              },
+                h('circle', { cx: bx.x + bx.w - 10, cy: bx.y + 13, r: 8, fill: 'var(--pb-card)', stroke: 'var(--pb-line,#cbd5e1)' }),
+                h('text', { x: bx.x + bx.w - 10, y: bx.y + 16, fontSize: 9, textAnchor: 'middle', fill: 'var(--pb-muted,#64748b)' }, folded[bx.id] === true ? '▸' : '▾')))
+          }
+          const acc = n?.acceptance?.length ?? 0
+          const depc = n?.deps?.length ?? 0
+          const pillW = 54
           return h('g', {
-            key: 'n' + it.node.id,
-            className: 'pb-node',
-            'data-id': it.node.id,
-            onPointerDown: (e: PEv) => { e.stopPropagation(); onNodePointerDown(e, it.node.id, { x: it.x, y: it.y }) },
+            key: 'n' + bx.id,
+            className: 'pb-node' + (isEditor ? ' pb-node-sel' : ''),
+            'data-id': bx.id,
+            opacity: op,
+            onPointerDown: (e: PEv) => { e.stopPropagation(); onNodePointerDown(e, bx.id, { x: bx.x, y: bx.y }) },
           },
-            isStation ? h('rect', { className: 'pb-station', x: it.x - 4, y: it.y - 4, width: it.w + 8, height: it.h + 8, rx: 12, fill: 'none', stroke: '#f59e0b', strokeWidth: 2 }) : null,
-            isEditor ? h('rect', { x: it.x - 6, y: it.y - 6, width: it.w + 12, height: it.h + 12, rx: 12, fill: 'none', stroke: '#8b5cf6', strokeWidth: 2, strokeDasharray: '6 3' }) : null,
-            h('rect', { x: it.x, y: it.y, width: it.w, height: it.h, rx: 9, fill: 'var(--pb-bg)', stroke: isEditor ? '#8b5cf6' : color, strokeWidth: 1.5 }),
-            h('rect', { x: it.x, y: it.y, width: 4, height: it.h, rx: 2, fill: color }),
-            h('text', { x: it.x + 12, y: it.y + it.h / 2 + 4, fontSize: 12, fontWeight: 600 },
-              (ord != null ? '#' + ord + ' ' : '') + (isDirty ? '● ' : '') + it.node.title.slice(0, 24)),
-            it.node.type === 'task' ? h('text', { x: it.x + it.w - 8, y: it.y + it.h / 2 + 4, fontSize: 10, textAnchor: 'end', fill: color }, it.node.status) : null,
-            it.node.type === 'task' ? h('circle', {
-              className: 'pb-handle', cx: it.x + it.w + 6, cy: it.y + it.h / 2, r: 5, fill: '#8b5cf6', opacity: .85,
+            isStation ? h('rect', { className: 'pb-station', x: bx.x - 4, y: bx.y - 4, width: bx.w + 8, height: bx.h + 8, rx: 12, fill: 'none', stroke: 'var(--pb-st-doing,#f59e0b)', strokeWidth: 2 }) : null,
+            isEditor ? h('rect', { className: 'pb-node-ring', x: bx.x - 3, y: bx.y - 3, width: bx.w + 6, height: bx.h + 6, rx: 12, fill: 'none', stroke: '#8b5cf6', strokeWidth: 2 }) : null,
+            h('rect', { className: 'pb-cardnode', x: bx.x, y: bx.y, width: bx.w, height: bx.h, rx: 10, fill: 'var(--pb-card)', stroke: blockedBy.length > 0 ? '#ef4444' : 'var(--pb-line,#e2e8f0)', strokeWidth: blockedBy.length > 0 ? 1.5 : 1, strokeDasharray: blockedBy.length > 0 ? '4 3' : undefined }),
+            // 左侧状态色条（不只靠边框/圆点）
+            h('rect', { x: bx.x, y: bx.y + 9, width: 4, height: bx.h - 18, rx: 2, fill: color }),
+            h('text', { className: 'pb-cardtitle', x: bx.x + 16, y: bx.y + 21, fontSize: 13, fontWeight: 500, fill: 'var(--pb-ink,#0f172a)' }, (ord != null ? '#' + ord + ' ' : '') + (isDirty ? '● ' : '') + title.slice(0, 18)),
+            // id 等宽徽标 + 次要元信息
+            h('rect', { x: bx.x + 16, y: bx.y + 28, width: 38, height: 14, rx: 4, fill: 'rgba(100,116,139,.14)' }),
+            h('text', { className: 'pb-monoid', x: bx.x + 35, y: bx.y + 39, fontSize: 10, textAnchor: 'middle', fill: 'var(--pb-muted,#64748b)' }, bx.id),
+            h('text', { x: bx.x + 60, y: bx.y + 39, fontSize: 11, fill: 'var(--pb-muted,#64748b)' }, meta.label + ' · 验收 ' + acc + ' · 依赖 ' + depc),
+            // 状态胶囊（右上）
+            h('g', {},
+              h('rect', { x: bx.x + bx.w - 8 - pillW, y: bx.y + 9, width: pillW, height: 16, rx: 8, fill: 'rgba(100,116,139,.10)', stroke: color, strokeWidth: 1 }),
+              h('text', { x: bx.x + bx.w - 8 - pillW + 8, y: bx.y + 21, fontSize: 10, fill: color }, meta.shape),
+              h('text', { x: bx.x + bx.w - 14, y: bx.y + 21, fontSize: 10, textAnchor: 'end', fill: color }, meta.label)),
+            // 被挡：贴在卡片右上角**外侧**的小胶囊（不压标题）
+            blockedBy.length > 0 ? h('g', { className: 'pb-blockpill' },
+              h('rect', { x: bx.x + bx.w - 78, y: bx.y - 10, width: 82, height: 17, rx: 8, fill: '#ef4444' }),
+              h('text', { x: bx.x + bx.w - 37, y: bx.y + 2, fontSize: 10, textAnchor: 'middle', fill: '#fff' }, '⛔ 被 ' + blockedBy.slice(0, 2).join(' ') + (blockedBy.length > 2 ? '…' : '') + ' 挡住')) : null,
+            // 拖紫点连依赖（保留）
+            h('circle', {
+              className: 'pb-handle', cx: bx.x + bx.w + 8, cy: bx.y + bx.h / 2, r: 5, fill: '#8b5cf6', opacity: .85,
               title: '拖到目标任务 = 目标依赖此任务；再拖一次 = 移除依赖',
-              onPointerDown: (e: PEv) => { e.stopPropagation(); onHandlePointerDown(e, it.node.id) },
-            }) : null);
-        }))));
+              onPointerDown: (e: PEv) => { e.stopPropagation(); onHandlePointerDown(e, bx.id) },
+            }))
+        }))),
+    // ===== 画布工具：顶部工具行 =====
+    h('div', { className: 'pb-canvasbar pb-canvasbar-tl' },
+      h('button', { className: 'pb-canvasbtn', 'aria-label': '适应画布', title: '适应画布（双击空白处也行）', onClick: doFit }, '适应'),
+      h('button', { className: 'pb-canvasbtn', 'aria-label': '折叠全部模块', title: '折叠全部模块', onClick: () => onFoldAll(true) }, '折叠全部'),
+      h('button', { className: 'pb-canvasbtn', 'aria-label': '展开全部模块', title: '展开全部模块', onClick: () => onFoldAll(false) }, '展开全部')),
+    // ===== 缩放工具条（左下）=====
+    h('div', { className: 'pb-canvasbar pb-canvasbar-bl' },
+      h('button', { className: 'pb-canvasbtn', 'aria-label': '缩小', onClick: () => zoomBy(0.9) }, '−'),
+      h('span', { className: 'pb-zoomval' }, Math.round(view.k * 100) + '%'),
+      h('button', { className: 'pb-canvasbtn', 'aria-label': '放大', onClick: () => zoomBy(1.1) }, '+'),
+      h('button', { className: 'pb-canvasbtn', 'aria-label': '适应画布', onClick: doFit }, '适应')),
+    // ===== 图例（右上，可折叠的小胶囊）=====
+    h('div', { className: 'pb-canvasbar pb-canvasbar-tr' },
+      h('button', { className: 'pb-canvasbtn', 'aria-expanded': legendOpen, 'aria-label': '图例', onClick: () => setLegendOpen(v => !v) }, legendOpen ? '图例 ▴' : '图例 ▾'),
+      legendOpen ? h('span', { className: 'pb-legend' },
+        ['planned', 'ready', 'doing', 'blocked', 'done'].map(s => {
+          const m = statusMeta(s)
+          return h('span', { className: 'pb-legend-item', key: 'lg' + s },
+            h('span', { className: 'pb-legend-shape', style: { color: m.color } }, m.shape),
+            h('span', {}, m.label))
+        })) : null),
+  )
 }
-
 /** 依赖多选（候选项来自板子节点 + 同提案新增的节点）。 */
 function DepPicker(props: { options: DepOption[]; value: string[]; onChange: (v: string[]) => void }): ReturnType<typeof h> {
   const { options, value, onChange } = props
@@ -1143,6 +1572,63 @@ function Skeleton(props: { rows?: number }): ReturnType<typeof h> {
   return h('div', { className: 'pb-skel', 'aria-hidden': 'true' },
     Array.from({ length: rows }, (_, i) => h('div', { className: 'pb-skel-row', key: 'sk' + i, style: { width: (60 + ((i * 17) % 40)) + '%' } })))
 }
+/** tab 栏：role=tablist / tab / aria-selected，←/→ 与 1-4 直达。 */
+function TabBar(props: { tab: PbTab; counts: Record<PbTab, number>; onChange: (t: PbTab) => void }): ReturnType<typeof h> {
+  const { tab, counts, onChange } = props
+  return h('div', { className: 'pb-tabs', role: 'tablist', 'aria-label': '面板分区' },
+    TAB_ORDER.map(t => {
+      const m = tabMeta(t, counts)
+      const on = t === tab
+      return h('button', {
+        key: t,
+        className: 'pb-tab' + (on ? ' pb-tab-on' : ''),
+        role: 'tab',
+        'aria-selected': on,
+        tabIndex: on ? 0 : -1,
+        onClick: () => onChange(t),
+      },
+        h('span', { className: 'pb-tab-label' }, m.label),
+        h('span', { className: 'pb-badge' + (m.count === 0 ? ' pb-badge-dim' : '') }, String(m.count)))
+    }))
+}
+
+/** 空画布占位：线框树 + 一句"怎么开始"（别只留一行字）。 */
+function EmptyCanvas(): ReturnType<typeof h> {
+  return h('div', { className: 'pb-emptycanvas' },
+    h('svg', { viewBox: '0 0 220 124', width: 220, height: 124, 'aria-hidden': 'true' },
+      h('rect', { x: 90, y: 8, width: 40, height: 18, rx: 6, fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, opacity: .55 }),
+      h('path', { d: 'M110 26 V44 M60 56 H160 M60 44 V56 M160 44 V56 M60 74 V92', fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, opacity: .35 }),
+      h('rect', { x: 30, y: 56, width: 60, height: 18, rx: 6, fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, opacity: .55 }),
+      h('rect', { x: 130, y: 56, width: 60, height: 18, rx: 6, fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, opacity: .55 }),
+      h('rect', { x: 30, y: 92, width: 60, height: 18, rx: 6, fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, opacity: .3 })),
+    h('div', { className: 'pb-empty-title' }, '还没有任务'),
+    h('div', { className: 'pb-empty-hint' }, '先让 agent 生成一份计划：说一句话，plan_generate 会把它变成「计划 → 模块 → 任务」三层结构。'))
+}
+/** 任务清单的排序条。 */
+function SortBar(props: { sort: 'status' | 'priority' | 'deps'; onChange: (s: 'status' | 'priority' | 'deps') => void }): ReturnType<typeof h> {
+  const opts: { id: 'status' | 'priority' | 'deps'; label: string }[] = [
+    { id: 'status', label: '按状态' }, { id: 'priority', label: '按优先级' }, { id: 'deps', label: '按依赖' },
+  ]
+  return h('div', { className: 'pb-sortbar' }, opts.map(o => h('button', {
+    key: o.id,
+    className: 'pb-canvasbtn' + (props.sort === o.id ? ' pb-canvasbtn-on' : ''),
+    'aria-pressed': props.sort === o.id,
+    onClick: () => props.onChange(o.id),
+  }, o.label)))
+}
+
+/** 任务清单的一行（拆成组件：JSX 嵌套太深，括号容易数错）。 */
+function TaskRow(props: { t: TopoNode; selected: boolean; onSelect: (id: string) => void }): ReturnType<typeof h> {
+  const t = props.t
+  return h('button', {
+    className: 'pb-taskrow' + (props.selected ? ' pb-taskrow-on' : ''),
+    onClick: () => props.onSelect(t.id),
+  },
+    h(StatusChip, { status: t.status }),
+    h('span', { className: 'pb-monoid pb-taskrow-id' }, t.id),
+    h('span', { className: 'pb-taskrow-title' }, t.title),
+    h('span', { className: 'pb-taskrow-meta' }, '验收 ' + (t.acceptance?.length ?? 0) + ' · 依赖 ' + (t.deps?.length ?? 0)))
+}
 interface PanelBoundaryProps { children?: ReactNode; onReset: () => void }
 interface PanelBoundaryState { error: Error | null }
 
@@ -1207,6 +1693,11 @@ function PaneWindow(): ReturnType<typeof h> | null {
   const [apOpen, setApOpen] = useState(false)
   const [evOpen, setEvOpen] = useState(false)
   const [query, setQuery] = useState('')
+  // 第 3 轮：面板分区（状态挂在面板根，切 tab 不丢草稿/选中/缩放/折叠）
+  const [tab, setTab] = useState<PbTab>('map')
+  const [taskSort, setTaskSort] = useState<'status' | 'priority' | 'deps'>('status')
+  // 第 2 轮：模块折叠（moduleId -> 是否折叠）
+  const [folded, setFolded] = useState<Record<string, boolean>>({})
   const searchRef = useRef<HTMLInputElement | null>(null)
   // 依赖候选项 = 板子上的节点（提案新增的节点在渲染时再并进来）
   const depOptions = useMemo<DepOption[]>(() => (data?.board.nodes ?? []).map(n => ({ id: n.id, title: n.title, type: n.type })), [data])
@@ -1322,32 +1813,13 @@ function PaneWindow(): ReturnType<typeof h> | null {
     for (const a of added) alive.push({ id: a.id, type: a.type, parent: a.parent, title: a.title, status: 'planned', deps: [] })
     return alive
   }, [data, drafts, added, removed]);
-  const layout = useMemo<Layout>(() => {
-    let y = 20
-    const items: LayoutItem[] = []
-    const floating: LayoutItem[] = []
-    const mods = effNodes.filter(n => n.type === 'module')
-    for (const m of mods) {
-      const tasks = effNodes.filter(t => t.type === 'task' && t.parent === m.id)
-      const h = MOD_H + tasks.length * ROW + 8
-      const mx = m.pos != null ? m.pos.x : 180
-      const my = m.pos != null ? m.pos.y : y
-      const mi: LayoutItem = { node: m, x: mx, y: my, w: 170, h: MOD_H - 6 }
-      if (m.pos != null) floating.push(mi); else items.push(mi)
-      let ty = my + MOD_H
-      for (const t of tasks) {
-        const ti: LayoutItem = { node: t, x: t.pos != null ? t.pos.x : 410, y: t.pos != null ? t.pos.y : ty, w: 260, h: ROW - 6 }
-        if (t.pos != null) floating.push(ti); else items.push(ti)
-        ty += ROW
-      }
-      y = (m.pos != null ? my + h : y + h) + 18
-    }
-    const totalH = Math.max(y + 20, 260)
-    // 有 pos 的节点（人手工摆过）脱流：最后绘制 = 盖在最上层，与点击/连线的 DOM 命中序一致
-    items.push(...floating)
-    items.push({ node: { id: '__root__', type: 'module', parent: null, title: b?.plan.name ?? 'Plan', status: 'planned', deps: [] }, x: 16, y: totalH / 2 - 20, w: 130, h: 40 })
-    return { items, totalH }
-  }, [effNodes, b]);
+  // 布局交给纯函数（分层树：模块分组块 + 父在子上居中 + 统一间距），useMemo 保证不重排
+  const layout = useMemo<MapLayout>(() => layoutMap(effNodes as unknown as { id: string; type: string; title: string; parent: string | null; pos?: { x: number; y: number } | null }[], folded), [effNodes, folded])
+  const foldAll = (v: boolean): void => {
+    const next: Record<string, boolean> = {}
+    for (const n of effNodes) if (n.type === 'module') next[n.id] = v
+    setFolded(next)
+  }
   const dirtyIds = useMemo(() => new Set([...Object.keys(drafts), ...added.map(a => a.id), ...removed]), [drafts, added, removed]);
   // ===== 聚焦卡：算出「现在该做什么」=====
   const focusPick = useMemo<FocusPick>(() => pickFocus(
@@ -1355,9 +1827,35 @@ function PaneWindow(): ReturnType<typeof h> | null {
     data?.order ?? {},
   ), [data])
   const focusKindLabel = focusPick.kind === 'doing' ? '进行中' : focusPick.kind === 'ready' ? '就绪' : focusPick.kind === 'blocked' ? '受阻' : '空闲'
+  // ===== 第 2 轮：拓扑（状态/依赖/阻塞/聚焦）=====
+  const topoNodes = useMemo<TopoNode[]>(() => (data?.board.nodes ?? []).map(n => ({
+    id: n.id, type: n.type, status: n.status, title: n.title, deps: n.deps ?? [], parent: n.parent, acceptance: n.acceptance,
+  })), [data])
+  // 聚焦集合 = 主任务 + 它的上游依赖链；其余节点淡出但仍可见
+  const focusIds = useMemo(() => focusChain(topoNodes, focusPick.taskId), [topoNodes, focusPick.taskId])
+  // 挡住每个任务的前置任务（角标 + 依赖边高亮都用它）
+  const blockers = useMemo(() => {
+    const byId = new Map(topoNodes.map(n => [n.id, n]))
+    const out: Record<string, string[]> = {}
+    for (const n of topoNodes) { const u = unmetDepsOf(n, byId); if (u.length > 0) out[n.id] = u }
+    return out
+  }, [topoNodes])
+  const focusTask = useMemo(() => topoNodes.find(n => n.id === focusPick.taskId), [topoNodes, focusPick.taskId])
+  const focusBlockers = useMemo(() => blockersOf(topoNodes, focusPick.taskId, data?.order ?? {}), [topoNodes, focusPick.taskId, data])
+  // 下一步可以做什么：ready 且依赖都满足
+  const readyList = useMemo(() => nextSteps(topoNodes), [topoNodes])
+  const toggleModule = (id: string): void => { setFolded(prev => ({ ...prev, [id]: prev[id] === true ? false : true })) }
   // 搜索只过滤导图（编辑/待批/聚焦卡都用全量数据）
   const q = query.trim().toLowerCase()
   const mapNodes = useMemo(() => (q === '' ? effNodes : effNodes.filter(n => n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q))), [effNodes, q])
+  // tab 徽标计数
+  const tabCounts: Record<PbTab, number> = {
+    map: mapNodes.length,
+    approvals: b?.pendingApprovals.length ?? 0,
+    tasks: topoNodes.filter(n => n.type === 'task').length,
+    events: (data?.events ?? []).length,
+  }
+
   /** 刷新：重拉 /state（重连流也顺带重开）。 */
   const refresh = (): void => { setNonce(n => n + 1) }
   /** 快捷键：/ 聚焦搜索、r 刷新、g 展开并聚焦导图、Esc 收起编辑。挂在面板根上，不劫持别的面板。 */
@@ -1365,6 +1863,13 @@ function PaneWindow(): ReturnType<typeof h> | null {
     const t = e.target as { tagName?: string; isContentEditable?: boolean } | null
     const tag = (t?.tagName ?? '').toUpperCase()
     const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable === true
+    // tab 快捷键：←/→ 切换、1-4 直达（输入框里不抢）
+    if (!inField) {
+      if (e.key === 'ArrowRight') { e.preventDefault(); setTab(t => nextTab(t, 1)); return }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); setTab(t => nextTab(t, -1)); return }
+      const byNum = tabByNumber(Number(e.key))
+      if (byNum != null) { e.preventDefault(); setTab(byNum); return }
+    }
     const sc = shortcutOf(e.key, inField)
     if (sc == null) return
     if (sc === 'close-editor') { setEditorId(null); setSaveMsg(''); return }
@@ -1397,7 +1902,8 @@ function PaneWindow(): ReturnType<typeof h> | null {
   const onNodeMove = (id: string, pos: { x: number; y: number }): void => {
     setDraft(id, { pos: { x: Math.round(pos.x), y: Math.round(pos.y) } })
   };
-  const onNodeClick = (id: string): void => { setEditorId(prev => (prev === id ? null : id)); setSaveMsg('') };
+  // 点节点选中 -> 顺手切到「任务」tab（编辑卡在那里，不然点了节点看不到反应）
+  const onNodeClick = (id: string): void => { setEditorId(prev => (prev === id ? null : id)); setSaveMsg(''); setTab('tasks') };
   const onHandlePointerDown = (e: PEv, id: string): void => { dragRef.current = { kind: 'dep', from: id } };
   const onDepDrop = (from: string, at: { clientX: number; clientY: number }): void => {
     // 落点用真实 DOM 命中（与「点节点」同一套判定，取视觉最上层节点）；
@@ -1729,72 +2235,90 @@ function PaneWindow(): ReturnType<typeof h> | null {
           h('div', { className: 'pb-focus-main' },
             focusPick.taskId != null ? h(StatusChip, { status: focusPick.kind }) : null,
             h('span', { className: 'pb-focus-title' }, focusPick.title !== '' ? focusPick.title : focusPick.detail),
+            focusPick.taskId != null ? h('span', { className: 'pb-focus-id' }, focusPick.taskId) : null,
             focusPick.taskId != null
               ? h('button', { className: 'pb-btn', 'aria-label': '编辑 ' + focusPick.title, onClick: () => { setEditorId(focusPick.taskId); setMapOpen(true) } }, '编辑')
               : null),
-          h('div', { className: 'pb-focus-hint' }, focusPick.title !== '' ? focusPick.detail + ' · ' + focusPick.hint : focusPick.hint)),
-        // ===== 导图（可折叠）=====
-        h(Zone, {
-          title: '任务思维导图',
-          badge: mapNodes.length > 0 ? String(mapNodes.length) : '空',
-          open: mapOpen,
-          onToggle: () => setMapOpen(v => !v),
-        },
-          h('div', { className: 'pb-hint' }, 'v' + b.version + ' · 拖拽移动 / 点节点编辑 / 紫点拖出连依赖' + (q !== '' ? ' · 正在搜索「' + query + '」' : '')),
-          mapNodes.length === 0
-            ? h(EmptyState, { kind: 'tasks' })
-            : h(MindMap, { data: data as BoardData, effNodes: mapNodes, layout, dirtyIds, view, setView, dragRef, depLine, setDepLine, editorId, onNodePointerDown, onNodeMove, onNodeClick, onDepDrop, onHandlePointerDown, svgRef } as never)),
-        // ===== 待批（折叠，徽标提示条数）=====
-        h(Zone, {
-          title: '待批提案',
-          badge: b.pendingApprovals.length > 0 ? String(b.pendingApprovals.length) : '0',
-          open: apOpen,
-          onToggle: () => setApOpen(v => !v),
-        },
-          b.pendingApprovals.length === 0
-            ? h(EmptyState, { kind: 'approvals' })
-            : b.pendingApprovals.map(ap => {
-              const orig = normOps(ap.ops)
-              const ops = apEdits[ap.id] ?? orig
-              const extra: DepOption[] = []
-              for (const o of ops) if (o.op === 'add_node') extra.push({ id: o.node.id, title: o.node.title, type: o.node.type })
-              return h(ApprovalCard, {
-                key: ap.id,
-                ap,
-                ops,
-                origOps: orig,
-                dirty: opsChanged(orig, ops),
-                cycle: proposalCycle(b.nodes, ops),
-                issues: proposalParentIssues(b.nodes, ops),
-                options: mergeDepOptions(depOptions, extra),
-                busy: apBusy === ap.id,
-                rev: apRev,
-                onOps: (next: PbOp[]) => { setApEdits(prev => ({ ...prev, [ap.id]: next })) },
-                onReset: () => {
-                  setApEdits(prev => { const n = { ...prev }; delete n[ap.id]; return n })
-                  setApRev(r => r + 1)
-                },
-                onApprove: () => { void approveAp(ap) },
-                onReject: () => { void rejectAp(ap) },
-              })
-            })),
-        // ===== 详情/编辑：点节点才展开 =====
-        editor != null ? h('section', { className: 'pb-zone', role: 'region', 'aria-label': '节点详情与编辑' }, editorCard) : null,
-        // ===== 事件流（折叠到最底）=====
-        h(Zone, {
-          title: '事件时间线',
-          badge: String((data?.events ?? []).length),
-          open: evOpen,
-          onToggle: () => setEvOpen(v => !v),
-        },
-          (data?.events ?? []).length === 0
-            ? h(EmptyState, { kind: 'events' })
-            : h('div', { className: 'pb-card' },
-              (data?.events ?? []).slice(-24).reverse().map(ev => h('div', { className: 'pb-ev', key: ev.seq },
-                h('span', {}, new Date(ev.ts).toLocaleTimeString()),
-                h('span', { style: { fontWeight: 700 } }, ev.kind),
-                h('span', { style: { opacity: .7 } }, ev.actor))))),
-      ))
+          // 验收标准摘要（第一轮只给了标题，这一轮给「要做到什么」）
+          focusTask != null ? h('div', { className: 'pb-focus-detail' }, '验收：' + acceptanceSummary(focusTask)) : null,
+          // 为什么还没轮到我
+          focusBlockers.length > 0 ? h('div', { className: 'pb-focus-blocked' },
+            h('span', { className: 'pb-focus-sub' }, '为什么还没轮到我'),
+            h('div', { className: 'pb-focus-blocked-list' }, focusBlockers.map(t => h('span', { className: 'pb-focus-blocked-item', key: 'bl' + t.id },
+              h(StatusChip, { status: t.status }), t.id + ' ' + t.title)))) : null,
+          // 下一步可以做什么（可直接点开那个任务）
+          readyList.length > 0 ? h('div', { className: 'pb-next' },
+            h('span', { className: 'pb-focus-sub' }, '下一步可以做什么'),
+            h('div', { className: 'pb-next-list' }, readyList.map(t => h('button', {
+              key: 'ns' + t.id, className: 'pb-next-item',
+              'aria-label': '打开任务 ' + t.id + ' ' + t.title,
+              onClick: () => { setEditorId(t.id); setMapOpen(true) },
+            }, h(StatusChip, { status: t.status }), t.id + ' ' + t.title)))) : null,
+          h('div', { className: 'pb-focus-hint' }, focusPick.hint)),
+        // ===== Tab 栏（吸顶）+ Tab 内容区（只渲染当前 tab）=====
+    h(TabBar, { tab, counts: tabCounts, onChange: (t: PbTab) => setTab(t) }),
+    h('div', { className: 'pb-tabbody', role: 'tabpanel', 'aria-label': tabMeta(tab, tabCounts).label },
+      // --- 导图 ---
+      tab === 'map'
+        ? (mapNodes.length === 0
+          ? h(EmptyCanvas, {})
+          : h(MindMap, { data: data as BoardData, effNodes: mapNodes, layout, dirtyIds, view, setView, dragRef, depLine, setDepLine, editorId, onNodePointerDown, onNodeMove, onNodeClick, onDepDrop, onHandlePointerDown, svgRef, folded, focusIds, blockers, onToggleModule: toggleModule, onFoldAll: foldAll } as never))
+        : null,
+      // --- 待批 ---
+      tab === 'approvals'
+        ? (b.pendingApprovals.length === 0
+          ? h(EmptyState, { kind: 'approvals' })
+          : h('div', { className: 'pb-tablist' }, b.pendingApprovals.map(ap => {
+            const orig = normOps(ap.ops)
+            const ops = apEdits[ap.id] ?? orig
+            const extra: DepOption[] = []
+            for (const o of ops) if (o.op === 'add_node') extra.push({ id: o.node.id, title: o.node.title, type: o.node.type })
+            return h(ApprovalCard, {
+              key: ap.id,
+              ap,
+              ops,
+              origOps: orig,
+              dirty: opsChanged(orig, ops),
+              cycle: proposalCycle(b.nodes, ops),
+              issues: proposalParentIssues(b.nodes, ops),
+              options: mergeDepOptions(depOptions, extra),
+              busy: apBusy === ap.id,
+              rev: apRev,
+              onOps: (next: PbOp[]) => { setApEdits(prev => ({ ...prev, [ap.id]: next })) },
+              onReset: () => {
+                setApEdits(prev => { const n = { ...prev }; delete n[ap.id]; return n })
+                setApRev(r => r + 1)
+              },
+              onApprove: () => { void approveAp(ap) },
+              onReject: () => { void rejectAp(ap) },
+            })
+          })))
+        : null,
+      // --- 任务清单 + 右侧编辑卡 ---
+      tab === 'tasks'
+        ? h('div', { className: 'pb-tasks' },
+          h('div', { className: 'pb-tasklist' },
+            h('div', { className: 'pb-tasklist-head' },
+              h('span', { className: 'pb-sec' }, '任务'),
+              h(SortBar, { sort: taskSort, onChange: (s) => setTaskSort(s) })),
+            taskRows(topoNodes, data?.order ?? {}, taskSort).map(g => h('div', { key: g.moduleId ?? 'none', className: 'pb-taskgroup' },
+              h('div', { className: 'pb-taskgroup-title' }, g.moduleTitle),
+              g.tasks.map(t => h(TaskRow, { key: t.id, t, selected: editorId === t.id, onSelect: (id) => { setEditorId(id); setSaveMsg('') } }))))),
+          h('div', { className: 'pb-taskedit' },
+            editor != null ? editorCard : h('div', { className: 'pb-hint' }, '点左边的任务，这里会出现编辑卡（标题 / 验收 / scope / 依赖 / 子导图）')),
+        )
+        : null,
+      // --- 事件流 ---
+      tab === 'events'
+        ? ((data?.events ?? []).length === 0
+          ? h(EmptyState, { kind: 'events' })
+          : h('div', { className: 'pb-card' },
+            (data?.events ?? []).slice(-40).reverse().map(ev => h('div', { className: 'pb-ev', key: ev.seq },
+              h('span', {}, new Date(ev.ts).toLocaleTimeString()),
+              h('span', { style: { fontWeight: 700 } }, ev.kind),
+              h('span', { style: { opacity: .7 } }, ev.actor)))))
+        : null,
+      )))
 }
 
 /** 宿主 locale 服务：注册字典 + 绑一个 t(key)。 */

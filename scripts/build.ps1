@@ -109,6 +109,22 @@ if (-not $SkipTypes) {
     Write-Step "跳过 src -> lib（-SkipTypes）"
 }
 
+# ---------- 1.5 面板类型检查（src/client 被包级 tsconfig 排除，这里单独查） ----------
+if (-not $SkipClient) {
+    $tscClient = Resolve-Bin 'tsc'
+    $clientConfig = Join-Path $Root 'tsconfig.client.json'
+    if ((Test-Path -LiteralPath $clientConfig) -and ($null -ne $tscClient)) {
+        Write-Step "类型检查面板（tsc -p tsconfig.client.json）"
+        & $tscClient -p tsconfig.client.json
+        $code = $LASTEXITCODE
+        if ($code -ne 0) {
+            Write-Fail "面板类型检查失败（退出码 $code）。src/client 不在包级 tsconfig 里，这一关是它唯一的编译门禁。" $code
+        }
+    } else {
+        Write-Host "  --  跳过面板类型检查（缺 tsconfig.client.json 或 tsc）" -ForegroundColor Yellow
+    }
+}
+
 # ---------- 2. tsdown：src/client/index.ts → lib/client.js ----------
 if (-not $SkipClient) {
     $tsdown = Resolve-Bin 'tsdown'
