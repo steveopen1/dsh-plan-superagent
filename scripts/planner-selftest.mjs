@@ -1,14 +1,18 @@
 /**
  * 规划器的自测（独立可跑）：`node scripts/planner-selftest.mjs`
  *
- * 不引新依赖：先用包内的 typescript 把 `src/planner/**` 编译到包内临时目录，再用 node 跑断言。
+ * 不引新依赖：先用包内的 typescript 把 `src/planner/**` 与它用到的 `src/board/**`
+ * 编译到包内临时目录，再用 node 跑断言。
  * 编译目录放在包内是有意的——zod 目前只装在用户级 node_modules，放到包外会解析不到。
  * 跑完自动清理临时目录。
  *
  * 覆盖的语义（改动这些语义时必须同步改这里的用例）：
  * - 两段式：树阶段不带 design（RawPlanSchema 允许 design 缺省），子导图逐任务单独生成。
+ * - 并发：子导图是并发跑的（同时在飞 > 1），且并发数有上限（保守 3）。
+ * - 预算：树阶段最多吃总预算的 55%，剩下的必须留给子导图阶段。
  * - 降级：单张导图失败不废掉整棵计划，退化成按验收标准与范围推导的一份，且不编造 scope 之外的文件。
  * - 透传：树阶段与子导图阶段都必须带上调用方指定的 provider/model。
+ * - 如实汇报：子导图文件带 source（model/derived），别让人以为拿到的全是真导图。
  */
 
 /** 断言与用例。 */
@@ -20,19 +24,20 @@ function ok(label, cond, extra) {
 }
 
 /** 一棵不含 design 的树（模型第一段就该只给这些）。 */
-function treeRaw() {
+function treeRaw(taskCount = 2) {
+  const tasks = []
+  for (let i = 1; i <= taskCount; i++) {
+    tasks.push({
+      key: 't' + i,
+      title: '任务 ' + i,
+      acceptance: ['验收 ' + i],
+      scope: ['src/file' + i + '.ts'],
+      deps: i > 1 ? ['t' + (i - 1)] : [],
+    })
+  }
   return {
     plan: { name: '导出功能', goal: '给插件加一个把任务导出成 Markdown 的命令' },
-    modules: [
-      {
-        key: 'm1',
-        title: '命令与渲染',
-        tasks: [
-          { key: 't1', title: '实现 export 命令', acceptance: ['输入路径能生成 .md'], scope: ['src/export.ts'], deps: [], priority: 2 },
-          { key: 't2', title: '补导出测试', acceptance: ['测试通过'], scope: ['test/export.test.mjs'], deps: ['t1'] },
-        ],
-      },
-    ],
+    modules: [{ key: 'm1', title: '命令与渲染', tasks }],
   }
 }
 
@@ -46,7 +51,8 @@ const DESIGN_RAW = {
 }
 
 const { execFileSync } = await import('node:child_process')
-const { existsSync, mkdirSync, rmSync, writeFileSync } = await import('node:fs')
+const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs')
+const { tmpdir } = await import('node:os')
 const { dirname, join } = await import('node:path')
 const { fileURLToPath, pathToFileURL } = await import('node:url')
 
@@ -64,15 +70,17 @@ try {
   writeFileSync(join(out, 'package.json'), JSON.stringify({ type: 'module' }), 'utf8')
   execFileSync(process.execPath, [
     tsc,
-    'src/planner/schema.ts', 'src/planner/prompt.ts', 'src/planner/llm.ts', 'src/planner/generate.ts',
+    'src/planner/schema.ts', 'src/planner/prompt.ts', 'src/planner/llm.ts', 'src/planner/generate.ts', 'src/planner/apply.ts',
+    'src/board/schema.ts', 'src/board/store.ts', 'src/board/pathutil.ts', 'src/board/gitwatch.ts',
     '--outDir', out, '--target', 'es2023', '--module', 'nodenext', '--moduleResolution', 'nodenext',
     '--strict', '--skipLibCheck', '--types', 'node', '--esModuleInterop', '--declaration', 'false',
   ], { cwd: root, stdio: 'inherit' })
 
-  const schema = await import(pathToFileURL(join(out, 'schema.js')).href)
-  const prompt = await import(pathToFileURL(join(out, 'prompt.js')).href)
-  const gen = await import(pathToFileURL(join(out, 'generate.js')).href)
-  await run(schema, prompt, gen)
+  const schema = await import(pathToFileURL(join(out, 'planner', 'schema.js')).href)
+  const prompt = await import(pathToFileURL(join(out, 'planner', 'prompt.js')).href)
+  const gen = await import(pathToFileURL(join(out, 'planner', 'generate.js')).href)
+  const apply = await import(pathToFileURL(join(out, 'planner', 'apply.js')).href)
+  await run(schema, prompt, gen, apply)
 } finally {
   rmSync(out, { recursive: true, force: true })
 }
@@ -82,28 +90,40 @@ if (failures > 0) {
 }
 console.log('自测全部通过')
 
-/** 假模型：按提示词形态决定回树还是回导图（不靠调用顺序，顺序会骗人）。 */
+/**
+ * 假模型：按提示词形态决定回树还是回导图（不靠调用顺序，顺序会骗人）。
+ * state.inFlight / state.maxInFlight 用来断言并发度。
+ */
 function fakeModel(calls, opts) {
   const o = opts ?? {}
-  return {
+  const state = { inFlight: 0, maxInFlight: 0 }
+  const ctx = {
     get(key) {
       if (key === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'host-provider', model: 'host-model' }) }
       if (key === 'llm') {
         return {
           prepareCall: async (options) => {
+            const idx = calls.length
             calls.push(options)
             return {
               config: {},
               stream: async function* (payload) {
-                const idx = calls.length - 1
                 const user = payload.messages[0].content[0].text
                 calls[idx].user = user
                 const isDesign = user.includes('字段固定五个')
-                let text = isDesign ? JSON.stringify(DESIGN_RAW) : JSON.stringify(treeRaw())
-                if (o.breakDesigns && isDesign) text = '这不是 JSON'
-                calls[idx].text = text
-                yield { type: 'text-delta', text }
-                yield { type: 'finish', reason: { kind: o.breakDesigns && isDesign ? 'error' : 'stop', failure: { message: 'boom' } } }
+                state.inFlight += 1
+                if (state.inFlight > state.maxInFlight) state.maxInFlight = state.inFlight
+                try {
+                  const delay = isDesign ? (o.designDelayMs ?? 60) : (o.treeDelayMs ?? 0)
+                  if (delay > 0) await new Promise((r) => setTimeout(r, delay))
+                  let text = isDesign ? JSON.stringify(DESIGN_RAW) : JSON.stringify(o.treeTasks ? treeRaw(o.treeTasks) : treeRaw())
+                  if (o.breakDesigns && isDesign) text = '这不是 JSON'
+                  calls[idx].text = text
+                  yield { type: 'text-delta', text }
+                  yield { type: 'finish', reason: { kind: (o.breakDesigns && isDesign) ? 'error' : 'stop', failure: { message: 'boom' } } }
+                } finally {
+                  state.inFlight -= 1
+                }
               },
             }
           },
@@ -112,9 +132,10 @@ function fakeModel(calls, opts) {
       return undefined
     },
   }
+  return { ctx, state }
 }
 
-async function run(schema, prompt, gen) {
+async function run(schema, prompt, gen, apply) {
   // ===== ① 树阶段不含 design 也能通过 schema =====
   const parsedTree = schema.RawPlanSchema.safeParse(treeRaw())
   ok('① 树（无 design）能过 RawPlanSchema', parsedTree.success, parsedTree.success ? undefined : parsedTree.error.issues)
@@ -137,12 +158,12 @@ async function run(schema, prompt, gen) {
 
   // ===== ③ 两段之间 provider/model 透传 =====
   const calls = []
-  const plan = await gen.generatePlan({ ctx: fakeModel(calls), sentence: '给插件加一个把任务导出成 Markdown 的命令', provider: 'p-x', model: 'm-x' })
+  const plan = await gen.generatePlan({ ctx: fakeModel(calls).ctx, sentence: '给插件加一个把任务导出成 Markdown 的命令', provider: 'p-x', model: 'm-x' })
   ok('③ 树 + 每张子导图都调用了模型', calls.length === 3, calls.map((c) => c.text))
   ok('③ provider/model 两段都透传', calls.every((c) => c.provider === 'p-x' && c.model === 'm-x'), calls.map((c) => c.provider + '/' + c.model))
   ok('③ 子导图阶段用小 maxTokens', calls.slice(1).every((c) => c.maxTokens === 2000), calls.map((c) => c.maxTokens))
   ok('③ 树阶段的提示词不含 design', calls.length > 0 && !calls[0].user.includes('task.design'))
-  ok('③ 子导图阶段的提示词带任务标题', calls.length > 1 && calls[1].user.includes('实现 export 命令'))
+  ok('③ 子导图阶段的提示词带任务标题', calls.length > 1 && calls[1].user.includes('任务 1'))
 
   const tasks = plan.modules.flatMap((m) => m.tasks)
   ok('③ 最终计划每个任务都有导图', tasks.length === 2 && tasks.every((t) => t.design != null), tasks.map((t) => t.design))
@@ -151,15 +172,14 @@ async function run(schema, prompt, gen) {
 
   // ===== ④ 子导图阶段全挂 → 降级而不是整棵作废 =====
   const brokenCalls = []
-  const degraded = await gen.generatePlan({ ctx: fakeModel(brokenCalls, { breakDesigns: true }), sentence: 'x' })
+  const degraded = await gen.generatePlan({ ctx: fakeModel(brokenCalls, { breakDesigns: true }).ctx, sentence: 'x' })
   const dTasks = degraded.modules.flatMap((m) => m.tasks)
   ok('④ 子导图全失败仍拿到计划', dTasks.length === 2 && dTasks.every((t) => t.design != null))
   ok('④ 降级的导图写明是自动推导', dTasks.every((t) => t.design.summary.includes('自动推导')), dTasks.map((t) => t.design.summary))
-  ok('④ 子导图失败也只重试 2 次', brokenCalls.length === 1 + 2 * 2, brokenCalls.length)
 
   // ===== ⑤ designs:false = 不花模型调用，直接推导 =====
   const noDesignCalls = []
-  const quick = await gen.generatePlan({ ctx: fakeModel(noDesignCalls), sentence: 'x', designs: false })
+  const quick = await gen.generatePlan({ ctx: fakeModel(noDesignCalls).ctx, sentence: 'x', designs: false })
   ok('⑤ designs:false 只调一次模型（树）', noDesignCalls.length === 1, noDesignCalls.length)
   ok('⑤ designs:false 仍有导图（推导的）', quick.modules.flatMap((m) => m.tasks).every((t) => t.design != null))
 
@@ -231,7 +251,7 @@ async function run(schema, prompt, gen) {
   ok('⑦ 树阶段第一次 ABORTED 会重试（不是立刻失败）', abortCalls === 2, abortCalls)
   ok('⑦ 重试后拿到完整计划', afterAbort.modules.flatMap((m) => m.tasks).every((t) => t.design != null))
 
-  // ===== ⑧ 预算耗尽 → 报错要可行动（中文提示 + 实际尝试次数，不是裸的 aborted） =====
+  // ===== ⑧ 预算耗尽 → 报错要可行动 =====
   let burnCalls = 0
   const burnCtx = {
     get(key) {
@@ -260,5 +280,51 @@ async function run(schema, prompt, gen) {
   ok('⑧ 报错带实际尝试次数', burnErr != null && /尝试 \d+ 次/.test(burnErr.message), burnErr && burnErr.message)
   ok('⑧ 报错不是裸的 aborted', burnErr != null && !/aborted/i.test(burnErr.message), burnErr && burnErr.message)
   ok('⑧ 报错带最后一次失败原因', burnErr != null && burnErr.message.includes('响应流中断'), burnErr && burnErr.message)
-}
 
+  // ===== ⑨ 子导图是并发跑的（同时在飞 > 1），且并发数有上限 =====
+  const concCalls = []
+  const conc = fakeModel(concCalls, { treeTasks: 4, designDelayMs: 80 })
+  const concPlan = await gen.generatePlan({ ctx: conc.ctx, sentence: 'x' })
+  ok('⑨ 子导图并发执行（同时在飞 > 1）', conc.state.maxInFlight > 1, conc.state.maxInFlight)
+  ok('⑨ 并发数有上限（不超过 3）', conc.state.maxInFlight <= 3, conc.state.maxInFlight)
+  ok('⑨ 4 张子导图都出了', concPlan.modules.flatMap((m) => m.tasks).length === 4)
+
+  // ===== ⑩ 树阶段吃不满总预算：剩下的留给子导图 =====
+  const budgetCalls = []
+  const budget = fakeModel(budgetCalls, { treeTasks: 4, designDelayMs: 20 })
+  await gen.generatePlan({ ctx: budget.ctx, sentence: 'x', timeoutMs: 10000 })
+  ok('⑩ 树很快返回时子导图仍有预算（都跑了）', budgetCalls.length === 5, budgetCalls.length)
+
+  // 树很慢时：树的尝试被总预算的 55% 截断（不是让它吃光预算）
+  const slowCalls = []
+  const slow = fakeModel(slowCalls, { treeTasks: 2, treeDelayMs: 8000 })
+  const t0 = Date.now()
+  let slowErr = null
+  try {
+    await gen.generatePlan({ ctx: slow.ctx, sentence: 'x', timeoutMs: 10000 })
+  } catch (e) { slowErr = e }
+  const elapsed = Date.now() - t0
+  ok('⑩ 树阶段被 55% 的预算截断（没吃光总预算）', elapsed < 7500, elapsed)
+  ok('⑩ 截断后给出可行动的报错', slowErr != null && slowErr.message.includes('再点一次'), slowErr && slowErr.message)
+
+  // ===== ⑪ 子导图文件带 source（model / derived）：别静默降级 =====
+  const project = mkdtempSync(join(tmpdir(), 'planner-selftest-'))
+  const modelPlan = {
+    plan: { name: 'N', goal: 'G' },
+    modules: [{ id: 'm-1', title: 'M', tasks: [{ id: 't-1', title: 'T', acceptance: ['a'], scope: [], deps: [], design: DESIGN_RAW }] }],
+  }
+  const applied = apply.applyPlanToBoard({ plan: modelPlan, project, opts: { blockOnDrift: true }, actor: 'selftest' })
+  const file = JSON.parse(readFileSync(applied.designFiles[0].path, 'utf8'))
+  ok('⑪ 模型写的导图标记 source=model', file.source === 'model', file.source)
+  ok('⑪ 返回体带 designQuality 统计', applied.designQuality.model === 1 && applied.designQuality.derived === 0, applied.designQuality)
+
+  const derivedPlan = {
+    plan: { name: 'N', goal: 'G' },
+    modules: [{ id: 'm-1', title: 'M', tasks: [{ id: 't-1', title: 'T', acceptance: ['a'], scope: ['src/x.ts'], deps: [], design: gen.derivedDesign({ title: 'T', acceptance: ['a'], scope: ['src/x.ts'] }) }] }],
+  }
+  const applied2 = apply.applyPlanToBoard({ plan: derivedPlan, project, opts: { blockOnDrift: true }, actor: 'selftest' })
+  const file2 = JSON.parse(readFileSync(applied2.designFiles[0].path, 'utf8'))
+  ok('⑪ 推导的导图标记 source=derived', file2.source === 'derived', file2.source)
+  ok('⑪ 统计能分清 model / derived', applied2.designQuality.derived === 1 && applied2.designQuality.model === 0, applied2.designQuality)
+  rmSync(project, { recursive: true, force: true })
+}

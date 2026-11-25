@@ -420,6 +420,75 @@ const STATUS_COLOR: Record<string, string> = {
 }
 
 /**
+ * ===== 状态语义：颜色 + 形状 + 文字三重编码 =====
+ * 只靠一个 6px 圆点，色盲看不出差别；现在三个通道一起给。
+ */
+interface StatusMeta { color: string; shape: string; label: string }
+function statusMeta(status: string): StatusMeta {
+  if (status === 'doing') return { color: STATUS_COLOR.doing, shape: '◐', label: '进行中' }
+  if (status === 'ready') return { color: STATUS_COLOR.ready, shape: '◇', label: '就绪' }
+  if (status === 'blocked') return { color: STATUS_COLOR.blocked, shape: '✕', label: '阻塞' }
+  if (status === 'done') return { color: STATUS_COLOR.done, shape: '●', label: '完成' }
+  if (status === 'canceled') return { color: STATUS_COLOR.canceled, shape: '—', label: '已取消' }
+  return { color: STATUS_COLOR.planned, shape: '○', label: '待办' }
+}
+
+/** ===== 聚焦卡：算出「现在该做什么」 ===== */
+interface FocusNode { id: string; type: string; status: string; title: string; deps: string[] }
+interface FocusPick {
+  kind: 'doing' | 'ready' | 'blocked' | 'idle'
+  taskId: string | null
+  title: string
+  detail: string
+  hint: string
+}
+
+/**
+ * 优先级：进行中的任务 > 下一个就绪任务 > 被依赖挡住的说明 > 空闲。
+ * 「下一个就绪」按板上的拓扑序号取最靠前的那个。
+ */
+function pickFocus(nodes: FocusNode[], order: Record<string, number>): FocusPick {
+  const tasks = nodes.filter(n => n.type === 'task')
+  const byId = new Map(tasks.map(n => [n.id, n]))
+  const rank = (a: FocusNode, b: FocusNode): number => (order[a.id] ?? 999) - (order[b.id] ?? 999)
+  const doing = tasks.filter(n => n.status === 'doing').sort(rank)[0]
+  if (doing != null) return { kind: 'doing', taskId: doing.id, title: doing.title, detail: '正在做：' + doing.title, hint: '这项做完再接下一件' }
+  const ready = tasks.filter(n => n.status === 'ready').sort(rank)[0]
+  if (ready != null) return { kind: 'ready', taskId: ready.id, title: ready.title, detail: '下一个就绪：' + ready.title, hint: '依赖都满足了，可以开工' }
+  const unmetOf = (n: FocusNode): string[] => n.deps.filter(d => {
+    const s = byId.get(d)
+    return s != null && s.status !== 'done' && s.status !== 'canceled'
+  })
+  const blocked = tasks.filter(n => n.status === 'planned' && unmetOf(n).length > 0).sort(rank)[0]
+  if (blocked != null) {
+    const names = unmetOf(blocked).map(d => byId.get(d)?.title ?? d)
+    return { kind: 'blocked', taskId: blocked.id, title: blocked.title, detail: '被 ' + names.join('、') + ' 挡住', hint: '先把前置任务做完' }
+  }
+  if (tasks.length === 0) return { kind: 'idle', taskId: null, title: '', detail: '板上还没有任务', hint: '用 plan_generate 生成一张任务树' }
+  return { kind: 'idle', taskId: null, title: '', detail: '没有进行中或就绪的任务', hint: '看看待批提案，或等 Agent 派单' }
+}
+
+/** ===== 空态：每种空态一句可操作的话（不是空白）===== */
+function emptyCopy(kind: 'board' | 'tasks' | 'approvals' | 'events'): { title: string; hint: string } {
+  if (kind === 'board') return { title: '这个项目下还没有 .plan-board', hint: '让 Agent 跑 plan_edit init_board 起板，或生成一张任务树' }
+  if (kind === 'tasks') return { title: '板上还没有任务', hint: '用 plan_generate 生成「计划 → 模块 → 任务」三层结构' }
+  if (kind === 'approvals') return { title: '没有待批提案', hint: '一切已批准，直接看导图开工' }
+  return { title: '还没有事件', hint: '板上的动作会按时间记在这里（审计用）' }
+}
+
+/** ===== 快捷键（克制，只这 4 个）===== */
+type PbShortcut = 'focus-search' | 'refresh' | 'focus-map' | 'close-editor'
+/** 输入框里只认 Esc（关掉编辑卡）；其余键交给输入框自己。 */
+function shortcutOf(key: string, inField: boolean): PbShortcut | null {
+  if (key === 'Escape') return 'close-editor'
+  if (inField) return null
+  if (key === '/') return 'focus-search'
+  if (key === 'r' || key === 'R') return 'refresh'
+  if (key === 'g' || key === 'G') return 'focus-map'
+  return null
+}
+
+/**
  * 宿主主区面板 id。
  *
  * main 是 keyed 槽（key = 面板 id），sidebar.panellist 是 list 槽（id = 同一个面板 id）：
@@ -450,16 +519,22 @@ function appDark(): boolean {
 
 const CSS = [
   // 面板住在宿主**主区**（main 槽 keyed）：宿主自己排版，不盖对话区（用户不接受 UI 挡住操作面）
+  // ===== 设计系统：字号阶梯 / 间距节奏 / 圆角 / 阴影 / 状态色，全部走变量 =====
   '.pb-panel{--pb-bg:#f8fafc;--pb-ink:#0f172a;--pb-line:#e2e8f0;--pb-card:#ffffff;--pb-muted:#64748b;',
+  '--pb-fs-11:11px;--pb-fs-12:12px;--pb-fs-13:13px;--pb-fs-15:15px;--pb-fs-18:18px;',
+  '--pb-sp-4:4px;--pb-sp-8:8px;--pb-sp-12:12px;--pb-sp-16:16px;--pb-sp-24:24px;',
+  '--pb-r-6:6px;--pb-r-8:8px;--pb-r-10:10px;',
+  '--pb-shadow-1:0 1px 2px rgba(15,23,42,.06);--pb-shadow-2:0 8px 24px rgba(15,23,42,.14);',
+  '--pb-st-planned:#94a3b8;--pb-st-ready:#3b82f6;--pb-st-doing:#f59e0b;--pb-st-blocked:#ef4444;--pb-st-done:#10b981;--pb-st-canceled:#6b7280;',
   'position:relative;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;',
   'background:var(--pb-bg);color:var(--pb-ink);border-left:1px solid var(--pb-line)}',
   '.pb-panel[data-collapsed] .pb-body{display:none}',
   '.pb-panel[data-mode="dark"]{--pb-bg:#0f141c;--pb-ink:#e2e8f0;--pb-line:#1e293b;--pb-card:#151b26;--pb-muted:#7c8798}',
   '.pb-head{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--pb-line)}',
-  '.pb-title{font-weight:700;font-size:13px;letter-spacing:.4px}',
+  '.pb-title{font-weight:700;font-size:var(--pb-fs-13);letter-spacing:.4px}',
   '.pb-input{flex:1;min-width:0;font:12px/1.4 ui-monospace,monospace;padding:5px 8px;border-radius:8px;',
   'border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-ink)}',
-  '.pb-btn{cursor:pointer;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:600;',
+  '.pb-btn{cursor:pointer;padding:5px 12px;border-radius:8px;font-size:var(--pb-fs-12);font-weight:600;',
   'border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-ink)}',
   '.pb-btn:hover{filter:brightness(1.08)}',
   '.pb-btn.pb-ok{background:#10b981;border-color:#10b981;color:#fff}',
@@ -467,7 +542,7 @@ const CSS = [
   '.pb-btn.pb-vio{background:#8b5cf6;border-color:#8b5cf6;color:#fff}',
   '.pb-btn:disabled{opacity:.5;cursor:not-allowed}',
   '.pb-body{flex:1;min-height:0;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px}',
-  '.pb-banner{padding:8px 12px;border-radius:10px;font-size:12px;font-weight:600;display:flex;gap:8px;align-items:center}',
+  '.pb-banner{padding:8px 12px;border-radius:10px;font-size:var(--pb-fs-12);font-weight:600;display:flex;gap:8px;align-items:center}',
   '.pb-banner.pb-drift{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.5);color:#ef4444}',
   '.pb-banner.pb-appr{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.45);color:#b45309}',
   '[data-mode="dark"] .pb-banner.pb-appr{color:#fbbf24}',
@@ -477,8 +552,8 @@ const CSS = [
   '[data-mode="dark"] .pb-banner.pb-hold{color:#94a3b8}',
   '.pb-banner.pb-dirty{background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.6);color:#b45309;position:sticky;top:0;z-index:5}',
   '[data-mode="dark"] .pb-banner.pb-dirty{color:#fbbf24}',
-  '.pb-card{background:var(--pb-card);border:1px solid var(--pb-line);border-radius:10px;padding:8px 10px;font-size:12px}',
-  '.pb-sec{font-size:11px;font-weight:700;letter-spacing:1px;color:var(--pb-muted);text-transform:uppercase}',
+  '.pb-card{background:var(--pb-card);border:1px solid var(--pb-line);border-radius:10px;padding:8px 10px;font-size:var(--pb-fs-12)}',
+  '.pb-sec{font-size:var(--pb-fs-11);font-weight:700;letter-spacing:1px;color:var(--pb-muted);text-transform:uppercase}',
   '.pb-ev{display:flex;gap:8px;font:11px ui-monospace,monospace;color:var(--pb-muted);padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
   '.pb-station{animation:pb-pulse 1.6s ease-in-out infinite}',
   '@keyframes pb-pulse{0%,100%{opacity:.35}50%{opacity:1}}',
@@ -488,13 +563,13 @@ const CSS = [
   '.pb-node{cursor:grab}',
   '.pb-node.pb-dragging{cursor:grabbing}',
   '.pb-handle{cursor:crosshair}',
-  '.pb-hint{font-size:11px;color:var(--pb-muted);line-height:1.6}',
+  '.pb-hint{font-size:var(--pb-fs-11);color:var(--pb-muted);line-height:1.6}',
   '.pb-form{display:flex;flex-direction:column;gap:8px}',
-  '.pb-form label{display:flex;flex-direction:column;gap:3px;font-size:11px;font-weight:600;color:var(--pb-muted)}',
+  '.pb-form label{display:flex;flex-direction:column;gap:3px;font-size:var(--pb-fs-11);font-weight:600;color:var(--pb-muted)}',
   '.pb-form input,.pb-form textarea,.pb-form select{font:12px/1.5 ui-sans-serif,system-ui,sans-serif;padding:5px 8px;border-radius:8px;',
   'border:1px solid var(--pb-line);background:var(--pb-bg);color:var(--pb-ink)}',
   '.pb-form textarea{min-height:44px;resize:vertical;font:12px/1.5 ui-monospace,monospace}',
-  '.pb-deprow{display:flex;align-items:center;gap:6px;font-size:12px;padding:2px 0}',
+  '.pb-deprow{display:flex;align-items:center;gap:6px;font-size:var(--pb-fs-12);padding:2px 0}',
   '.pb-dot{width:6px;height:6px;border-radius:50%;background:#f59e0b;display:inline-block}',
   // ===== 入口按钮（A 极光玻璃 + C 能量核心）：高度 31px、圆角 999px，与「Android 面板」严格对齐 =====
   // 深色极光玻璃（两种主题同款，对齐概念稿 A）：内层近黑玻璃(padding-box) + 外层青→紫→洋红渐变描边(border-box)
@@ -525,9 +600,9 @@ const CSS = [
   'box-shadow:0 0 0 1px rgba(168,85,247,.45),0 6px 26px rgba(124,58,237,.55),0 0 26px rgba(56,189,248,.40),0 0 30px rgba(232,121,249,.32),inset 0 0 18px rgba(124,58,237,.45)}',
   'box-shadow:0 1px 6px rgba(99,102,241,.4),inset 0 1px 0 rgba(255,255,255,.12)}',
   '@keyframes pb-aurora{0%,100%{opacity:.8;filter:saturate(1)}50%{opacity:1;filter:saturate(1.35)}}',
-  '.pb-projrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--pb-line);font-size:11px;color:var(--pb-muted)}',
-  '.pb-projpath{font-family:ui-monospace,monospace;font-size:11px;color:var(--pb-ink);cursor:pointer;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-  '.pb-tag{cursor:pointer;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.pb-projrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--pb-line);font-size:var(--pb-fs-11);color:var(--pb-muted)}',
+  '.pb-projpath{font-family:ui-monospace,monospace;font-size:var(--pb-fs-11);color:var(--pb-ink);cursor:pointer;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.pb-tag{cursor:pointer;padding:2px 8px;border-radius:999px;font-size:var(--pb-fs-11);border:1px solid var(--pb-line);background:var(--pb-card);color:var(--pb-muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.pb-tag.pb-on{border-color:#8b5cf6;color:#7c3aed;background:rgba(139,92,246,.12)}',
   '[data-mode="dark"] .pb-tag.pb-on{color:#a78bfa}',
   '.pb-tag:hover{filter:brightness(1.08)}',
@@ -544,20 +619,54 @@ const CSS = [
   '.pb-modebtn:disabled{opacity:.35;cursor:not-allowed}',
   '.pb-ops{border:1px dashed var(--pb-line);border-radius:8px;padding:6px;margin:6px 0;display:flex;flex-direction:column;gap:6px;background:rgba(100,116,139,.05)}',
   '.pb-oprow{border:1px solid var(--pb-line);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:5px;background:var(--pb-card)}',
-  '.pb-ophead{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--pb-muted)}',
+  '.pb-ophead{display:flex;align-items:center;gap:6px;font-size:var(--pb-fs-11);font-weight:700;color:var(--pb-muted)}',
   '.pb-chip{font:10px/1.4 ui-monospace,monospace;padding:1px 6px;border-radius:999px;background:rgba(139,92,246,.12);color:#7c3aed}',
   '[data-mode="dark"] .pb-chip{color:#a78bfa}',
   '.pb-oplabel{display:flex;flex-direction:column;gap:2px;font-size:10px;font-weight:600;color:var(--pb-muted)}',
   '.pb-oplabel input,.pb-oplabel textarea,.pb-oplabel select{font:11px/1.5 ui-sans-serif,system-ui,sans-serif;padding:3px 6px;border-radius:6px;border:1px solid var(--pb-line);background:var(--pb-bg);color:var(--pb-ink)}',
   '.pb-oplabel textarea{min-height:38px;resize:vertical;font:11px/1.5 ui-monospace,monospace}',
   '.pb-deps{display:flex;flex-direction:column;gap:2px;max-height:150px;overflow:auto;border:1px solid var(--pb-line);border-radius:6px;padding:4px;background:var(--pb-bg)}',
-  '.pb-deps .pb-deprow{font-size:11px}',
-  '.pb-cycle{font-size:11px;font-weight:700;color:#ef4444;line-height:1.5}',
+  '.pb-deps .pb-deprow{font-size:var(--pb-fs-11)}',
+  '.pb-cycle{font-size:var(--pb-fs-11);font-weight:700;color:#ef4444;line-height:1.5}',
+  // ===== 新版式：顶栏 / 聚焦卡 / 分区 / 空态 / 骨架 / 状态徽标 =====
+  '.pb-topbar{display:flex;flex-direction:column;gap:var(--pb-sp-8);padding:var(--pb-sp-12) var(--pb-sp-16);border-bottom:1px solid var(--pb-line);background:var(--pb-card)}',
+  '.pb-topbar-row{display:flex;align-items:center;gap:var(--pb-sp-8);flex-wrap:wrap}',
+  '.pb-brand{font-size:var(--pb-fs-15);font-weight:700;letter-spacing:.2px}',
+  '.pb-grow{flex:1;min-width:120px}',
+  '.pb-search{max-width:180px}',
+  '.pb-tags{display:flex;flex-wrap:wrap;gap:var(--pb-sp-4)}',
+  '.pb-focus{margin:var(--pb-sp-12) var(--pb-sp-16);padding:var(--pb-sp-12) var(--pb-sp-16);border:1px solid var(--pb-line);border-radius:var(--pb-r-10);background:var(--pb-card);box-shadow:var(--pb-shadow-1);display:flex;flex-direction:column;gap:var(--pb-sp-8)}',
+  '.pb-focus-kicker{font-size:var(--pb-fs-11);font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--pb-muted)}',
+  '.pb-focus-main{display:flex;align-items:center;gap:var(--pb-sp-8);flex-wrap:wrap}',
+  '.pb-focus-title{font-size:var(--pb-fs-18);font-weight:700;line-height:1.3}',
+  '.pb-focus-detail{font-size:var(--pb-fs-13);color:var(--pb-ink);line-height:1.6}',
+  '.pb-focus-hint{font-size:var(--pb-fs-12);color:var(--pb-muted);line-height:1.6}',
+  '.pb-status{display:inline-flex;align-items:center;gap:var(--pb-sp-4);font-size:var(--pb-fs-11);font-weight:700;padding:2px var(--pb-sp-8);border-radius:999px;border:1px solid currentColor;background:rgba(100,116,139,.10)}',
+  '.pb-status-shape{font-size:var(--pb-fs-12);line-height:1}',
+  '.pb-zone{margin:0 var(--pb-sp-16) var(--pb-sp-12)}',
+  '.pb-zonehead{display:flex;align-items:center;gap:var(--pb-sp-8);width:100%;text-align:left;cursor:pointer;padding:var(--pb-sp-8) var(--pb-sp-12);border:1px solid var(--pb-line);border-radius:var(--pb-r-8);background:var(--pb-card);color:var(--pb-ink);font-size:var(--pb-fs-13);font-weight:700}',
+  '.pb-zonehead:hover{background:rgba(139,92,246,.08)}',
+  '.pb-zonehead:active{transform:translateY(1px)}',
+  '.pb-zone-caret{color:var(--pb-muted);font-size:var(--pb-fs-12)}',
+  '.pb-zone-title{flex:1}',
+  '.pb-badge{font-size:var(--pb-fs-11);font-weight:700;padding:1px var(--pb-sp-8);border-radius:999px;background:rgba(139,92,246,.14);color:#7c3aed}',
+  '[data-mode="dark"] .pb-badge{color:#a78bfa}',
+  '.pb-zonebody{margin-top:var(--pb-sp-8);display:flex;flex-direction:column;gap:var(--pb-sp-8)}',
+  '.pb-empty{display:flex;flex-direction:column;gap:var(--pb-sp-4);padding:var(--pb-sp-16);border:1px dashed var(--pb-line);border-radius:var(--pb-r-8);background:rgba(100,116,139,.05)}',
+  '.pb-empty-title{font-size:var(--pb-fs-15);font-weight:700}',
+  '.pb-empty-hint{font-size:var(--pb-fs-13);color:var(--pb-muted);line-height:1.6}',
+  '.pb-empty-action{margin-top:var(--pb-sp-4);display:flex;gap:var(--pb-sp-8)}',
+  '.pb-skel{display:flex;flex-direction:column;gap:var(--pb-sp-8);padding:var(--pb-sp-16)}',
+  '.pb-skel-row{height:12px;border-radius:var(--pb-r-6);background:linear-gradient(90deg,rgba(100,116,139,.14),rgba(100,116,139,.26),rgba(100,116,139,.14));background-size:200% 100%;animation:pb-shimmer 1.4s linear infinite}',
+  '@keyframes pb-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}',
+  '.pb-errbar{display:flex;align-items:center;gap:var(--pb-sp-8);margin:var(--pb-sp-12) var(--pb-sp-16) 0;padding:var(--pb-sp-8) var(--pb-sp-12);border:1px solid rgba(239,68,68,.5);border-radius:var(--pb-r-8);background:rgba(239,68,68,.10);font-size:var(--pb-fs-13);color:#b91c1c}',
+  '[data-mode="dark"] .pb-errbar{color:#fca5a5}',
+  '.pb-kbd{font:11px/1.4 ui-monospace,monospace;padding:1px 5px;border:1px solid var(--pb-line);border-bottom-width:2px;border-radius:var(--pb-r-6);background:var(--pb-bg);color:var(--pb-muted)}',
   // 崩溃面：宿主那道边界只会留空 div，这里自己给一句人话 + 一个重载按钮
-  '.pb-crash{padding:14px;border:1px solid rgba(239,68,68,.5);border-radius:10px;background:rgba(239,68,68,.08);display:flex;flex-direction:column;gap:8px;font-size:12px;color:inherit}',
-  '.pb-crash-title{font-weight:700;color:#ef4444;font-size:13px}',
+  '.pb-crash{padding:14px;border:1px solid rgba(239,68,68,.5);border-radius:10px;background:rgba(239,68,68,.08);display:flex;flex-direction:column;gap:8px;font-size:var(--pb-fs-12);color:inherit}',
+  '.pb-crash-title{font-weight:700;color:#ef4444;font-size:var(--pb-fs-13)}',
   '.pb-crash-msg{opacity:.85;line-height:1.6}',
-  '.pb-crash-btn{cursor:pointer;align-self:flex-start;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid #ef4444;background:#ef4444;color:#fff}',
+  '.pb-crash-btn{cursor:pointer;align-self:flex-start;padding:5px 12px;border-radius:8px;font-size:var(--pb-fs-12);font-weight:600;border:1px solid #ef4444;background:#ef4444;color:#fff}',
   // ===== 子导图 =====
   '.pb-designbar{display:flex;align-items:center;gap:8px;margin-top:2px}',
   '.pb-design{border:1px dashed var(--pb-line);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:8px;background:rgba(100,116,139,.05)}',
@@ -996,6 +1105,44 @@ function PanelBoardIcon(props: { size?: number; active?: boolean }): ReturnType<
     h('path', { d: 'M9.2 9.2V20' }),
     h('path', { d: 'M12.8 13.2h4.4M12.8 16.6h4.4' }))
 }
+/** 状态徽标：颜色 + 形状 + 文字三重编码（色盲可用）。 */
+function StatusChip(props: { status: string; label?: string }): ReturnType<typeof h> {
+  const m = statusMeta(props.status)
+  return h('span', { className: 'pb-status', style: { color: m.color }, 'data-status': props.status },
+    h('span', { className: 'pb-status-shape', 'aria-hidden': 'true' }, m.shape),
+    h('span', {}, props.label ?? m.label))
+}
+
+/** 分区（可折叠）：标题行带徽标，body 收起时不占位置。 */
+function Zone(props: { title: string; badge?: string; open: boolean; onToggle: () => void; children?: unknown; id?: string }): ReturnType<typeof h> {
+  return h('section', { className: 'pb-zone', role: 'region', 'aria-label': props.title, id: props.id },
+    h('button', {
+      className: 'pb-zonehead',
+      'aria-expanded': props.open,
+      onClick: props.onToggle,
+      title: (props.open ? '收起' : '展开') + props.title,
+    },
+      h('span', { className: 'pb-zone-caret', 'aria-hidden': 'true' }, props.open ? '▾' : '▸'),
+      h('span', { className: 'pb-zone-title' }, props.title),
+      props.badge != null && props.badge !== '' ? h('span', { className: 'pb-badge' }, props.badge) : null),
+    props.open ? h('div', { className: 'pb-zonebody' }, props.children as never) : null)
+}
+
+/** 空态：一句标题 + 一句可操作的话（不留白屏）。 */
+function EmptyState(props: { kind: 'board' | 'tasks' | 'approvals' | 'events'; action?: unknown }): ReturnType<typeof h> {
+  const c = emptyCopy(props.kind)
+  return h('div', { className: 'pb-empty' },
+    h('div', { className: 'pb-empty-title' }, c.title),
+    h('div', { className: 'pb-empty-hint' }, c.hint),
+    props.action != null ? h('div', { className: 'pb-empty-action' }, props.action as never) : null)
+}
+
+/** 加载态：微光骨架（别让人干等）。 */
+function Skeleton(props: { rows?: number }): ReturnType<typeof h> {
+  const rows = props.rows ?? 3
+  return h('div', { className: 'pb-skel', 'aria-hidden': 'true' },
+    Array.from({ length: rows }, (_, i) => h('div', { className: 'pb-skel-row', key: 'sk' + i, style: { width: (60 + ((i * 17) % 40)) + '%' } })))
+}
 interface PanelBoundaryProps { children?: ReactNode; onReset: () => void }
 interface PanelBoundaryState { error: Error | null }
 
@@ -1055,6 +1202,12 @@ function PaneWindow(): ReturnType<typeof h> | null {
   const [design, setDesign] = useState<PbDesign | null>(null)
   const [designMsg, setDesignMsg] = useState('')
   const [designBusy, setDesignBusy] = useState(false)
+  // ===== 分区折叠 / 搜索 =====
+  const [mapOpen, setMapOpen] = useState(true)
+  const [apOpen, setApOpen] = useState(false)
+  const [evOpen, setEvOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const searchRef = useRef<HTMLInputElement | null>(null)
   // 依赖候选项 = 板子上的节点（提案新增的节点在渲染时再并进来）
   const depOptions = useMemo<DepOption[]>(() => (data?.board.nodes ?? []).map(n => ({ id: n.id, title: n.title, type: n.type })), [data])
   const [view, setView] = useState({ k: 1, tx: 0, ty: 0 })
@@ -1196,6 +1349,30 @@ function PaneWindow(): ReturnType<typeof h> | null {
     return { items, totalH }
   }, [effNodes, b]);
   const dirtyIds = useMemo(() => new Set([...Object.keys(drafts), ...added.map(a => a.id), ...removed]), [drafts, added, removed]);
+  // ===== 聚焦卡：算出「现在该做什么」=====
+  const focusPick = useMemo<FocusPick>(() => pickFocus(
+    (data?.board.nodes ?? []).map(n => ({ id: n.id, type: n.type, status: n.status, title: n.title, deps: n.deps })),
+    data?.order ?? {},
+  ), [data])
+  const focusKindLabel = focusPick.kind === 'doing' ? '进行中' : focusPick.kind === 'ready' ? '就绪' : focusPick.kind === 'blocked' ? '受阻' : '空闲'
+  // 搜索只过滤导图（编辑/待批/聚焦卡都用全量数据）
+  const q = query.trim().toLowerCase()
+  const mapNodes = useMemo(() => (q === '' ? effNodes : effNodes.filter(n => n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q))), [effNodes, q])
+  /** 刷新：重拉 /state（重连流也顺带重开）。 */
+  const refresh = (): void => { setNonce(n => n + 1) }
+  /** 快捷键：/ 聚焦搜索、r 刷新、g 展开并聚焦导图、Esc 收起编辑。挂在面板根上，不劫持别的面板。 */
+  const onPanelKey = (e: { key: string; target: unknown; preventDefault: () => void }): void => {
+    const t = e.target as { tagName?: string; isContentEditable?: boolean } | null
+    const tag = (t?.tagName ?? '').toUpperCase()
+    const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable === true
+    const sc = shortcutOf(e.key, inField)
+    if (sc == null) return
+    if (sc === 'close-editor') { setEditorId(null); setSaveMsg(''); return }
+    e.preventDefault()
+    if (sc === 'focus-search') searchRef.current?.focus()
+    else if (sc === 'refresh') refresh()
+    else if (sc === 'focus-map') { setMapOpen(true); setTimeout(() => svgRef.current?.scrollIntoView({ block: 'nearest' }), 0) }
+  }
   // 打开编辑卡时优先保住导图可见（不跳屏）；只在卡片标题行整个落在视野外时才滚动一下
   useEffect(() => {
     if (editorId == null) return
@@ -1458,37 +1635,65 @@ function PaneWindow(): ReturnType<typeof h> | null {
       h('span', { className: 'pb-hint', style: { alignSelf: 'center' } }, editor.type === 'task' ? '状态流转与证据走 task_update（L3 证据门），不在面板直改' : '模块删除需先清空子任务')))
   }
   const editorCard = editor != null ? h('div', { className: 'pb-card pb-form', key: 'editor', ref: editorRef }, editorChildren) : null
-  return h('div', { className: 'pb-panel', 'data-mode': mode, 'data-collapsed': collapsed ? 'true' : undefined },
-    h('div', { className: 'pb-head' },
-      h('span', { className: 'pb-title' }, '🗺 PlanBoard'),
-      h('input', { className: 'pb-input', value: project, placeholder: '项目根目录绝对路径，如 /path/to/your/project 或 C:\\path\\to\\project', onChange: (e: { target: { value: string } }) => setProject(e.target.value), onBlur: () => { void rememberProject(project) } }),
-      h('button', { className: 'pb-btn', onClick: () => setCollapsed(v => !v) }, collapsed ? '展开' : '收起'),
-    ),
-    // ===== 顶部常驻区：项目切换 + 一句话生成（不用切到聊天框） =====
-    h('div', { className: 'pb-projrow' },
-      h('span', {}, '当前项目：'),
-      h('span', { className: 'pb-projpath', title: project, onClick: () => setProjListOpen(v => !v) }, project.trim() === '' ? '（未设置）' : project),
-      h('span', { className: 'pb-hint', style: { cursor: 'pointer' }, onClick: () => setProjListOpen(v => !v) }, '（点此切换）'),
-      recent.slice(0, 12).map(r => h('button', {
-        key: r.project,
-        className: 'pb-tag' + (r.project === project ? ' pb-on' : ''),
-        title: r.project,
-        onClick: () => { setProject(r.project); setProjListOpen(false); setSaveMsg(''); void rememberProject(r.project) },
-      }, projListOpen ? clip(r.name, 18) + ' · ' + r.project : clip(r.name, 18)))),
-    err !== '' ? h('div', { className: 'pb-banner pb-drift' }, '⚠ ' + err) : null,
-    b == null ? h('div', { className: 'pb-body' },
-      h('div', { className: 'pb-card' },
-        h('div', { style: { fontWeight: 700, marginBottom: '4px' } }, project.trim() === '' ? '① 选一个最近打开的项目（或把项目根目录粘到上面的输入框）' : '⚠ 这个项目下还没有 .plan-board/'),
-        h('div', { className: 'pb-hint' }, project.trim() === ''
-          ? '面板只读+直改规划；任务状态仍走 task_update（L3 证据门）。① 点上面一行里的项目标签切换；② 或直接在顶部输入框写一句话生成导图（服务端自动起板，结构变更先进待批队列，人可改可驳）。'
-          : '这个项目下还没有 .plan-board/。不碍事：在顶部输入框写一句话就能生成导图（服务端自动起板 + 进待批队列，人可改内容再确认）；也可以让 Agent 跑 plan_edit init_board 起板。'),
-        recent.length > 0 ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '10px' } },
-          recent.map(r => h('button', {
-            key: r.project, className: 'pb-btn', title: r.project,
-            onClick: () => setProject(r.project),
-          }, r.name + ' · ' + r.project))) : null,
-      )) :
-      h('div', { className: 'pb-body' },
+  return h('div', {
+    className: 'pb-panel',
+    'data-mode': mode,
+    'data-collapsed': collapsed ? 'true' : undefined,
+    role: 'region',
+    'aria-label': 'PlanBoard 规划面板',
+    // 分区键盘可达：面板根可聚焦，快捷键挂在它身上（不劫持别的面板/聊天框）
+    tabIndex: 0,
+    onKeyDown: onPanelKey,
+  },
+    // ===== 顶栏（常驻）：项目切换 · 状态徽标 · 刷新 =====
+    h('div', { className: 'pb-topbar' },
+      h('div', { className: 'pb-topbar-row' },
+        h('span', { className: 'pb-brand' }, '🗺 PlanBoard'),
+        h(StatusChip, { status: focusPick.kind === 'idle' ? 'planned' : focusPick.kind, label: focusKindLabel }),
+        h('input', {
+          className: 'pb-input pb-grow',
+          value: project,
+          placeholder: '项目根目录绝对路径，如 C:\\path\\to\\project',
+          'aria-label': '项目根目录绝对路径',
+          onChange: (e: { target: { value: string } }) => setProject(e.target.value),
+          onBlur: () => { void rememberProject(project) },
+        }),
+        h('input', {
+          className: 'pb-input pb-search',
+          ref: searchRef,
+          value: query,
+          placeholder: '搜索任务（/）',
+          'aria-label': '搜索任务',
+          onChange: (e: { target: { value: string } }) => setQuery(e.target.value),
+        }),
+        h('button', { className: 'pb-btn', 'aria-label': '刷新板面', title: '刷新板面（快捷键 r）', onClick: () => { refresh() } }, '⟳ 刷新'),
+        h('button', { className: 'pb-btn', onClick: () => setCollapsed(v => !v) }, collapsed ? '展开' : '收起')),
+      h('div', { className: 'pb-topbar-row pb-tags' },
+        h('span', { className: 'pb-hint' }, '最近项目：'),
+        recent.length === 0 ? h('span', { className: 'pb-hint' }, '（还没有记录）') : null,
+        recent.slice(0, 12).map(r => h('button', {
+          key: r.project,
+          className: 'pb-tag' + (r.project === project ? ' pb-on' : ''),
+          title: r.project,
+          'aria-label': '切换到项目 ' + r.project,
+          onClick: () => { setProject(r.project); setSaveMsg(''); void rememberProject(r.project) },
+        }, clip(r.name, 18))))),
+    // ===== 错误条：面板内可见 + 重试（不是只有一层空白）=====
+    err !== '' ? h('div', { className: 'pb-errbar', role: 'alert' },
+      h('span', { style: { flex: 1 } }, '⚠ ' + err),
+      h('button', { className: 'pb-btn', onClick: () => { refresh() } }, '重试')) : null,
+    // ===== 加载态：骨架（别干等）=====
+    data == null && err === ''
+      ? h('div', { className: 'pb-body' }, h(Skeleton, { rows: 4 }))
+      : b == null ? h('div', { className: 'pb-body' },
+        h('div', { className: 'pb-card' },
+          h(EmptyState, { kind: 'board' }),
+          recent.length > 0 ? h('div', { className: 'pb-empty-action' },
+            recent.slice(0, 6).map(r => h('button', {
+              key: r.project, className: 'pb-btn', title: r.project, 'aria-label': '切换到项目 ' + r.project,
+              onClick: () => { setProject(r.project); void rememberProject(r.project) },
+            }, r.name))) : null),
+      ) : h('div', { className: 'pb-body' },
         dirtyCount > 0 ? h('div', { className: 'pb-banner pb-dirty' },
           '● ' + dirtyCount + ' 项未保存更改（拖拽位置/内容/依赖/增删，保存后才生效）',
           h('button', { className: 'pb-btn pb-ok', style: { marginLeft: 'auto' }, disabled: saving, onClick: () => { void save() } }, saving ? '保存中…' : '保存更改'),
@@ -1499,13 +1704,13 @@ function PaneWindow(): ReturnType<typeof h> | null {
           '⛔ 漂移阻断: ' + b.driftBlock.reason,
           h('button', {
             className: 'pb-btn pb-ok', style: { marginLeft: 'auto' },
-            onClick: () => { void post('/unblock', { project }).then(() => setNonce(n => n + 1)) },
+            onClick: () => { void post('/unblock', { project }).then(() => refresh()) },
           }, '解除阻断')) : null,
         (data?.guard?.suspended ? h('div', { className: 'pb-banner pb-hold' },
           '⏸ L7 越界拦截已挂起（仅内存态，重启后自动恢复拦截）',
           h('button', {
             className: 'pb-btn pb-ok', style: { marginLeft: 'auto' },
-            onClick: () => { void post('/guard', { project, suspended: false }).then(() => setNonce(n => n + 1)) },
+            onClick: () => { void post('/guard', { project, suspended: false }).then(() => refresh()) },
           }, '恢复拦截')) : null),
         ((): ReturnType<typeof h> | null => {
           const blocks = (data?.events ?? []).filter(ev => ev.kind === 'guard_block')
@@ -1515,48 +1720,81 @@ function PaneWindow(): ReturnType<typeof h> | null {
             '🛡 L7 越界拦截 ' + blocks.length + ' 次: ' + (last.payload?.tool ?? '?') + ' → ' + (last.payload?.path ?? '?') + '（任务 ' + (last.payload?.taskId ?? '?') + '）',
             h('button', {
               className: 'pb-btn', style: { marginLeft: 'auto' },
-              onClick: () => { void post('/guard', { project, suspended: true }).then(() => setNonce(n => n + 1)) },
+              onClick: () => { void post('/guard', { project, suspended: true }).then(() => refresh()) },
             }, '暂停拦截'))
         })(),
-        b.pendingApprovals.length > 0 ? h('div', { className: 'pb-banner pb-appr' },
-          '⏳ ' + b.pendingApprovals.length + ' 个 plan_edit 待批',
-          h('span', { style: { fontWeight: 400, opacity: .85 } }, b.pendingApprovals[0].reason.slice(0, 60))) : null,
-        b.pendingApprovals.map(ap => {
-          // 每条待批提案单独一份编辑态：原提案 vs 人改过的版本
-          const orig = normOps(ap.ops)
-          const ops = apEdits[ap.id] ?? orig
-          const extra: DepOption[] = []
-          for (const o of ops) if (o.op === 'add_node') extra.push({ id: o.node.id, title: o.node.title, type: o.node.type })
-          return h(ApprovalCard, {
-            key: ap.id,
-            ap,
-            ops,
-            origOps: orig,
-            dirty: opsChanged(orig, ops),
-            cycle: proposalCycle(b.nodes, ops),
-            issues: proposalParentIssues(b.nodes, ops),
-            options: mergeDepOptions(depOptions, extra),
-            busy: apBusy === ap.id,
-            rev: apRev,
-            onOps: (next: PbOp[]) => { setApEdits(prev => ({ ...prev, [ap.id]: next })) },
-            onReset: () => {
-              setApEdits(prev => { const n = { ...prev }; delete n[ap.id]; return n })
-              setApRev(r => r + 1)
-            },
-            onApprove: () => { void approveAp(ap) },
-            onReject: () => { void rejectAp(ap) },
-          })
-        }),
-        h('div', { className: 'pb-sec' }, '任务思维导图 v' + b.version + ' · digest ' + (b.digest ?? '').slice(0, 10) + ' · 拖拽移动 / 点节点编辑 / 紫点拖出连依赖'),
-        h(MindMap, { data: data as BoardData, effNodes, layout, dirtyIds, view, setView, dragRef, depLine, setDepLine, editorId, onNodePointerDown, onNodeMove, onNodeClick, onDepDrop, onHandlePointerDown, svgRef } as never),
-        editorCard,
-        h('div', { className: 'pb-sec' }, '事件时间线'),
-        h('div', { className: 'pb-card' },
-          (data?.events ?? []).slice(-24).reverse().map(ev => h('div', { className: 'pb-ev', key: ev.seq },
-            h('span', {}, new Date(ev.ts).toLocaleTimeString()),
-            h('span', { style: { fontWeight: 700 } }, ev.kind),
-            h('span', { style: { opacity: .7 } }, ev.actor))))),
-  )
+        // ===== 聚焦卡：第一屏就说清「现在该做什么」=====
+        h('section', { className: 'pb-focus', role: 'region', 'aria-label': '现在该做什么' },
+          h('div', { className: 'pb-focus-kicker' }, '现在该做什么'),
+          h('div', { className: 'pb-focus-main' },
+            focusPick.taskId != null ? h(StatusChip, { status: focusPick.kind }) : null,
+            h('span', { className: 'pb-focus-title' }, focusPick.title !== '' ? focusPick.title : focusPick.detail),
+            focusPick.taskId != null
+              ? h('button', { className: 'pb-btn', 'aria-label': '编辑 ' + focusPick.title, onClick: () => { setEditorId(focusPick.taskId); setMapOpen(true) } }, '编辑')
+              : null),
+          h('div', { className: 'pb-focus-hint' }, focusPick.title !== '' ? focusPick.detail + ' · ' + focusPick.hint : focusPick.hint)),
+        // ===== 导图（可折叠）=====
+        h(Zone, {
+          title: '任务思维导图',
+          badge: mapNodes.length > 0 ? String(mapNodes.length) : '空',
+          open: mapOpen,
+          onToggle: () => setMapOpen(v => !v),
+        },
+          h('div', { className: 'pb-hint' }, 'v' + b.version + ' · 拖拽移动 / 点节点编辑 / 紫点拖出连依赖' + (q !== '' ? ' · 正在搜索「' + query + '」' : '')),
+          mapNodes.length === 0
+            ? h(EmptyState, { kind: 'tasks' })
+            : h(MindMap, { data: data as BoardData, effNodes: mapNodes, layout, dirtyIds, view, setView, dragRef, depLine, setDepLine, editorId, onNodePointerDown, onNodeMove, onNodeClick, onDepDrop, onHandlePointerDown, svgRef } as never)),
+        // ===== 待批（折叠，徽标提示条数）=====
+        h(Zone, {
+          title: '待批提案',
+          badge: b.pendingApprovals.length > 0 ? String(b.pendingApprovals.length) : '0',
+          open: apOpen,
+          onToggle: () => setApOpen(v => !v),
+        },
+          b.pendingApprovals.length === 0
+            ? h(EmptyState, { kind: 'approvals' })
+            : b.pendingApprovals.map(ap => {
+              const orig = normOps(ap.ops)
+              const ops = apEdits[ap.id] ?? orig
+              const extra: DepOption[] = []
+              for (const o of ops) if (o.op === 'add_node') extra.push({ id: o.node.id, title: o.node.title, type: o.node.type })
+              return h(ApprovalCard, {
+                key: ap.id,
+                ap,
+                ops,
+                origOps: orig,
+                dirty: opsChanged(orig, ops),
+                cycle: proposalCycle(b.nodes, ops),
+                issues: proposalParentIssues(b.nodes, ops),
+                options: mergeDepOptions(depOptions, extra),
+                busy: apBusy === ap.id,
+                rev: apRev,
+                onOps: (next: PbOp[]) => { setApEdits(prev => ({ ...prev, [ap.id]: next })) },
+                onReset: () => {
+                  setApEdits(prev => { const n = { ...prev }; delete n[ap.id]; return n })
+                  setApRev(r => r + 1)
+                },
+                onApprove: () => { void approveAp(ap) },
+                onReject: () => { void rejectAp(ap) },
+              })
+            })),
+        // ===== 详情/编辑：点节点才展开 =====
+        editor != null ? h('section', { className: 'pb-zone', role: 'region', 'aria-label': '节点详情与编辑' }, editorCard) : null,
+        // ===== 事件流（折叠到最底）=====
+        h(Zone, {
+          title: '事件时间线',
+          badge: String((data?.events ?? []).length),
+          open: evOpen,
+          onToggle: () => setEvOpen(v => !v),
+        },
+          (data?.events ?? []).length === 0
+            ? h(EmptyState, { kind: 'events' })
+            : h('div', { className: 'pb-card' },
+              (data?.events ?? []).slice(-24).reverse().map(ev => h('div', { className: 'pb-ev', key: ev.seq },
+                h('span', {}, new Date(ev.ts).toLocaleTimeString()),
+                h('span', { style: { fontWeight: 700 } }, ev.kind),
+                h('span', { style: { opacity: .7 } }, ev.actor))))),
+      ))
 }
 
 /** 宿主 locale 服务：注册字典 + 绑一个 t(key)。 */

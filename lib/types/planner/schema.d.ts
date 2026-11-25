@@ -37,6 +37,8 @@ export declare const TaskDesignSchema: z.ZodObject<{
     tests: string[];
 }>;
 export type TaskDesign = z.infer<typeof TaskDesignSchema>;
+/** 推导导图的标记：出现在 summary 开头，表示这张不是模型写的（而是按验收标准与范围推导的）。 */
+export declare const DERIVED_MARKER = "\uFF08\u81EA\u52A8\u63A8\u5BFC";
 /** 最终计划里的 task：id 由生成器统一分配（`t-1..`），deps 只引用 task id。 */
 export declare const PlanTaskSchema: z.ZodObject<{
     id: z.ZodString;

@@ -22,12 +22,16 @@ import { join } from 'node:path'
 import { callModel } from './llm.js'
 import { DESIGN_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT, buildDesignPrompt, buildUserPrompt } from './prompt.js'
 import {
-  Plan, PlanSchema, PlannerError, RawPlan, RawPlanSchema, TaskDesign, TaskDesignSchema,
+  DERIVED_MARKER, Plan, PlanSchema, PlannerError, RawPlan, RawPlanSchema, TaskDesign, TaskDesignSchema,
   TreePlan, TreeTask, formatIssues,
 } from './schema.js'
 
 /** 树阶段单次调用上限：树是主产出，值得多等一会儿。 */
 const TREE_TIMEOUT_CAP = 180_000
+/** 树阶段最多吃掉总预算的 55%：剩下的**必须**留给子导图阶段（上次翻车就是树吃光了预算）。 */
+const TREE_BUDGET_RATIO = 0.55
+/** 子导图并发数：保守取 3——宿主 llm 服务会排队，并发太高只是把请求堆在队列里。 */
+const DESIGN_CONCURRENCY = 3
 /** 树阶段重试的最小剩余预算：连这点时间都不够就别再试了，直接给可行动的报错。 */
 const TREE_MIN_BUDGET = 5_000
 /** 单张子导图的调用上限。 */
@@ -43,7 +47,7 @@ export interface GenerateOptions {
   /** 目标仓库的可选上下文。 */
   context?: string
   signal?: AbortSignal
-  /** 整段生成的**总预算**（毫秒）：树 + 全部子导图共用；默认 240s。 */
+  /** 整段生成的**总预算**（毫秒）：树 + 全部子导图共用；默认 420s。 */
   timeoutMs?: number
   /** 最大尝试次数（首次 + 重试），默认 3。 */
   maxAttempts?: number
@@ -57,6 +61,8 @@ export interface GenerateOptions {
    * false = 不花模型调用，直接按任务已有的验收标准与范围推导一份。
    */
   designs?: boolean
+  /** 子导图并发数（默认 3）。宿主 llm 服务会排队，保守些。 */
+  designConcurrency?: number
 }
 
 /** 严格 JSON 解析：只做「BOM / 思考块 / 整段代码围栏」三种精确清理，绝不按花括号切片。 */
@@ -267,10 +273,13 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
   const sentence = String(opts.sentence ?? '').trim()
   if (sentence === '') throw new PlannerError('EMPTY_SENTENCE', '一句话不能为空')
   const maxAttempts = Math.max(1, Math.min(5, Math.floor(Number(opts.maxAttempts ?? 3))))
-  // 总预算：树 + 全部子导图共用。面板给 180s、内部只给 90s 本身就是不一致，故默认给到 240s。
-  const totalBudget = Math.max(10_000, Number(opts.timeoutMs ?? 240_000))
+  // 总预算：树 + 全部子导图共用。默认给到 420s：8 张子导图并发 3 张约 2~3 批，要留够钱。
+  const totalBudget = Math.max(10_000, Number(opts.timeoutMs ?? 420_000))
   const maxTokens = Number(opts.maxTokens ?? 12_000)
   const deadline = Date.now() + totalBudget
+  // 树阶段最多吃总预算的 55%：剩下的必须留给子导图阶段（上次 8 张全降级就是树吃光了钱）。
+  const treeBudget = Math.floor(totalBudget * TREE_BUDGET_RATIO)
+  const treeStart = Date.now()
 
   let feedback = ''
   let lastProblem = ''
@@ -279,8 +288,13 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
   let lastReason = '模型调用失败'
   let attemptsMade = 0
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const remaining = deadline - Date.now()
-    if (remaining < TREE_MIN_BUDGET) {
+    const now = Date.now()
+    const remaining = deadline - now
+    const treeLeft = treeBudget - (now - treeStart)
+    if (remaining < TREE_MIN_BUDGET || treeLeft < TREE_MIN_BUDGET) {
+      if (treeLeft < TREE_MIN_BUDGET && remaining >= TREE_MIN_BUDGET) {
+        lastProblem = (lastProblem === '' ? '' : lastProblem + '\n') + '（树阶段的尝试已达总预算 55% 的上限，剩下的预算留给子导图阶段）'
+      }
       // 预算烧完了：不再开新的一次调用（开下去就是超支 = 超时），直接给可行动的报错。
       break
     }
@@ -292,8 +306,8 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
         system: PLAN_SYSTEM_PROMPT,
         user,
         signal: opts.signal,
-        // 这一次只能用剩下的钱：树先拿大头（上限 180s），重试只吃剩余预算，绝不超支。
-        timeoutMs: Math.max(1_000, Math.min(remaining, TREE_TIMEOUT_CAP)),
+        // 这一次只能用剩下的钱：树先拿大头（上限 180s），且所有尝试加起来不超过总预算的 55%。
+        timeoutMs: Math.max(1_000, Math.min(remaining, treeLeft, TREE_TIMEOUT_CAP)),
         maxTokens,
         provider: opts.provider,
         model: opts.model,
@@ -350,7 +364,7 @@ export async function generatePlan(opts: GenerateOptions): Promise<Plan> {
       continue
     }
 
-    // 树先落地，子导图随后逐个生成：一次输出整棵大树会把模型的流打断。
+    // 树先落地，子导图随后并发补：一次输出整棵大树会把模型的流打断。
     return await withDesigns(built.plan, opts, deadline)
   }
 
@@ -392,17 +406,22 @@ function treeFailure(seconds: number, attempts: number, reason: string, detail: 
 async function withDesigns(tree: TreePlan, opts: GenerateOptions, deadline: number): Promise<Plan> {
   const context = String(opts.context ?? '')
   const wantModel = opts.designs !== false
+  const pending: TreeTask[] = []
   for (const module of tree.modules) {
     for (const task of module.tasks) {
-      if (task.design != null) continue
-      const left = deadline - Date.now()
-      if (!wantModel || left < DESIGN_MIN_BUDGET) {
-        // 预算不够（或调用方不要模型导图）：按任务自身推导，绝不编造 scope 之外的文件。
-        task.design = derivedDesign(task)
-        continue
-      }
-      task.design = await oneDesign(tree, task, opts, context, deadline)
+      if (task.design == null) pending.push(task)
     }
+  }
+  if (!wantModel) {
+    // 调用方不要模型导图：全部按任务自身推导。
+    for (const task of pending) task.design = derivedDesign(task)
+  } else {
+    // 并发出：8 张串行要 160~240 秒（放不进预算），并发 3 张约 2~3 批、60~90 秒。
+    await runPool(pending, opts.designConcurrency ?? DESIGN_CONCURRENCY, async (task) => {
+      const left = deadline - Date.now()
+      // 预算不够就降级（宁可推导也不失败），但要在返回里说清几张是推导的。
+      task.design = left < DESIGN_MIN_BUDGET ? derivedDesign(task) : await oneDesign(tree, task, opts, context, deadline)
+    })
   }
   // 最终形状要求每个任务都有导图（PlanTaskSchema.design 必填）——这里再兜一次。
   const final = PlanSchema.safeParse(tree)
@@ -413,6 +432,30 @@ async function withDesigns(tree: TreePlan, opts: GenerateOptions, deadline: numb
     )
   }
   return final.data
+}
+
+/**
+ * 小并发池：同时最多 limit 个任务在飞。
+ *
+ * 用 allSettled 收口：单张失败（超时 / 流断）不影响其它张——每张自己会降级。
+ * 唯一要往外抛的是「调用方取消」：取消不是「这张画不出来」。
+ */
+async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+  if (items.length === 0) return
+  const size = Math.max(1, Math.min(limit, items.length))
+  let next = 0
+  const runners = Array.from({ length: size }, async () => {
+    while (true) {
+      const i = next
+      next += 1
+      if (i >= items.length) return
+      await worker(items[i])
+    }
+  })
+  const settled = await Promise.allSettled(runners)
+  for (const s of settled) {
+    if (s.status === 'rejected' && s.reason instanceof PlannerError && s.reason.code === 'CANCELLED') throw s.reason
+  }
 }
 
 /** 一个任务的子导图：两次尝试，都失败就按任务本身推导一份（并说明是推导的）。 */
@@ -465,7 +508,7 @@ async function oneDesign(
 export function derivedDesign(task: { title: string; acceptance: string[]; scope: string[] }): TaskDesign {
   const acceptance = task.acceptance.length > 0 ? task.acceptance : ['完成任务：' + task.title]
   return {
-    summary: '（自动推导：模型这次没给出子导图，按验收标准与改动范围推导）' + task.title,
+    summary: DERIVED_MARKER + '：模型这次没给出子导图，按验收标准与改动范围推导）' + task.title,
     steps: acceptance.map((a) => '完成并验证：' + a),
     // 只用任务自己的 scope：不编造范围之外的文件（编了会把 L4 漂移核对带偏）。
     files: task.scope.slice(),

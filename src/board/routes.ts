@@ -177,7 +177,55 @@ export interface ModeDeps {
   project?: string
 }
 
+
+/**
+ * 子导图来源统计：几张是模型写的（model）、几张是推导的（derived）。
+ *
+ * 为什么在路由侧算：规划器在宿主那半，板子不该反向依赖它。
+ * 契约是子导图文件里的 source 字段，而 note 里带着它的相对路径——这两样就够了。
+ */
+function designQualityOf(project: string, ops: EditOp[]): { model: number; derived: number; total: number } | null {
+  let model = 0
+  let derived = 0
+  let total = 0
+  for (const op of ops) {
+    if (op.op !== 'update_node') continue
+    const note = op.fields.note
+    if (typeof note !== 'string') continue
+    const m = /^design-graph:\s*(.+)$/.exec(note)
+    if (m == null) continue
+    const file = join(project, ...m[1].split('/').filter((p) => p !== '' && p !== '.'))
+    let source = 'model'
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as { source?: string }
+      source = typeof parsed.source === 'string' ? parsed.source : 'model'
+    } catch { source = 'model' }
+    total += 1
+    if (source === 'derived') derived += 1
+    else model += 1
+  }
+  return total > 0 ? { model, derived, total } : null
+}
+
+/** 把 designQuality 挂到 /plan 的返回体上（板子还没有就原样返回）。 */
+function withDesignQuality(
+  project: string,
+  result: Record<string, unknown>,
+  registry: BoardRegistry,
+): Record<string, unknown> {
+  try {
+    const store = PlanStore.open(project, registry.opts, registry.onEvent)
+    const apId = typeof result.approvalId === 'string' ? result.approvalId : ''
+    const ap = store.board.pendingApprovals.find(x => x.id === apId)
+      ?? store.board.pendingApprovals[store.board.pendingApprovals.length - 1]
+    const q = ap != null ? designQualityOf(project, ap.ops) : null
+    if (q != null) return { ...result, designQuality: q }
+  } catch { /* 板还没有就算了，不影响主结果 */ }
+  return result
+}
+
 export function mountRoutes(
+
   webServer: { register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void },
   registry: BoardRegistry,
   plan?: PlanHook,
@@ -375,12 +423,16 @@ export function mountRoutes(
               const result = await plan({
                 project,
                 sentence,
-                timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : 240_000,
+
+                timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : 420_000,
+
                 maxAttempts: typeof body.maxAttempts === 'number' ? body.maxAttempts : 3,
                 provider: typeof body.provider === 'string' ? body.provider : undefined,
                 model: typeof body.model === 'string' ? body.model : undefined,
               })
-              sendJson(res, 200, result)
+              // 如实汇报子导图来源：几张是模型写的、几张是推导的。
+              // 静默降级过一次（8 张全是推导的，用户却以为拿到了真导图），所以必须写出来。
+              sendJson(res, 200, withDesignQuality(project, result, registry))
             } catch (e) {
               // The planner reports its own problem (no model, invalid output); the panel shows it.
               sendJson(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) })

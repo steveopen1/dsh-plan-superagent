@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import type { EditOp } from '../board/schema.js'
 import { PlanStore } from '../board/store.js'
 import type { EventBroadcast, StoreOpts } from '../board/store.js'
+import { DERIVED_MARKER } from './schema.js'
 import type { Plan, PlanModule, PlanTask } from './schema.js'
 import { PlannerError } from './schema.js'
 
@@ -49,6 +50,13 @@ export interface DesignFileRef {
   relative: string
 }
 
+/** 子导图来源统计：几张是模型写的，几张是推导的。 */
+export interface DesignQuality {
+  model: number
+  derived: number
+  total: number
+}
+
 export interface ApplyPlanResult {
   ok: true
   project: string
@@ -64,9 +72,13 @@ export interface ApplyPlanResult {
   taskCount: number
   /** 送审的 op 条数。 */
   opCount: number
+
   reason: string
   designFiles: DesignFileRef[]
+  /** 子导图来源统计（model = 模型写的，derived = 推导的）。 */
+  designQuality: DesignQuality
 }
+
 
 /** 把相对目录（'/' 分隔）转成绝对路径（Windows 友好，不手拼分隔符）。 */
 export function designDirAbs(project: string, designDir: string): string {
@@ -173,6 +185,7 @@ export function writeDesigns(project: string, plan: Plan, designDir: string = DE
   for (const m of plan.modules) {
     for (const t of m.tasks) {
       const file = join(dir, t.id + '.json')
+
       const payload = {
         taskId: t.id,
         taskTitle: t.title,
@@ -180,8 +193,12 @@ export function writeDesigns(project: string, plan: Plan, designDir: string = DE
         moduleTitle: m.title,
         plan: plan.plan,
         generatedAt: now,
+        // source：这张导图是模型写的还是推导的？——/plan 返回体靠它如实汇报，
+        // 不能让人以为拿到的 8 张全是模型写的（静默降级过一次，教训）。
+        source: t.design.summary.startsWith(DERIVED_MARKER) ? 'derived' : 'model',
         design: t.design,
       }
+
       const tmp = file + '.tmp'
       writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8')
       renameSync(tmp, file)
@@ -236,12 +253,20 @@ export function applyPlanToBoard(options: ApplyPlanOptions): ApplyPlanResult {
     b.pendingApprovals.push({ id: approvalId, reason, ops, by: options.actor, proposedAt: now })
   })
 
+
   let moduleCount = 0
   let taskCount = 0
+  let modelDesigns = 0
+  let derivedDesigns = 0
   for (const m of finalPlan.modules) {
     moduleCount += 1
     taskCount += m.tasks.length
+    for (const t of m.tasks) {
+      if (t.design.summary.startsWith(DERIVED_MARKER)) derivedDesigns += 1
+      else modelDesigns += 1
+    }
   }
+
 
   return {
     ok: true,
@@ -253,10 +278,13 @@ export function applyPlanToBoard(options: ApplyPlanOptions): ApplyPlanResult {
     moduleCount,
     taskCount,
     opCount: ops.length,
+
     reason,
     designFiles,
+    designQuality: { model: modelDesigns, derived: derivedDesigns, total: modelDesigns + derivedDesigns },
   }
 }
+
 
 /** 读回某个 task 的子导图文件（消费方用；文件不存在返回 null）。 */
 export function readDesign(project: string, taskId: string, designDir: string = DESIGN_DIR): unknown {

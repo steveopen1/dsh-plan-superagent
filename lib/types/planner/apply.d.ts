@@ -26,6 +26,12 @@ export interface DesignFileRef {
     /** 相对项目根的指针（写进 note）。 */
     relative: string;
 }
+/** 子导图来源统计：几张是模型写的，几张是推导的。 */
+export interface DesignQuality {
+    model: number;
+    derived: number;
+    total: number;
+}
 export interface ApplyPlanResult {
     ok: true;
     project: string;
@@ -43,6 +49,8 @@ export interface ApplyPlanResult {
     opCount: number;
     reason: string;
     designFiles: DesignFileRef[];
+    /** 子导图来源统计（model = 模型写的，derived = 推导的）。 */
+    designQuality: DesignQuality;
 }
 /** 把相对目录（'/' 分隔）转成绝对路径（Windows 友好，不手拼分隔符）。 */
 export declare function designDirAbs(project: string, designDir: string): string;

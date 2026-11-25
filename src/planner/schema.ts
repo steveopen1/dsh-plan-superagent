@@ -33,6 +33,9 @@ export const TaskDesignSchema = z.object({
 
 export type TaskDesign = z.infer<typeof TaskDesignSchema>
 
+/** 推导导图的标记：出现在 summary 开头，表示这张不是模型写的（而是按验收标准与范围推导的）。 */
+export const DERIVED_MARKER = '（自动推导'
+
 /** 最终计划里的 task：id 由生成器统一分配（`t-1..`），deps 只引用 task id。 */
 export const PlanTaskSchema = z.object({
   id: z.string().min(1),

@@ -7,7 +7,7 @@ export interface GenerateOptions {
     /** 目标仓库的可选上下文。 */
     context?: string;
     signal?: AbortSignal;
-    /** 整段生成的**总预算**（毫秒）：树 + 全部子导图共用；默认 240s。 */
+    /** 整段生成的**总预算**（毫秒）：树 + 全部子导图共用；默认 420s。 */
     timeoutMs?: number;
     /** 最大尝试次数（首次 + 重试），默认 3。 */
     maxAttempts?: number;
@@ -21,6 +21,8 @@ export interface GenerateOptions {
      * false = 不花模型调用，直接按任务已有的验收标准与范围推导一份。
      */
     designs?: boolean;
+    /** 子导图并发数（默认 3）。宿主 llm 服务会排队，保守些。 */
+    designConcurrency?: number;
 }
 /** 严格 JSON 解析：只做「BOM / 思考块 / 整段代码围栏」三种精确清理，绝不按花括号切片。 */
 export declare function parseStrictJson(text: string): unknown;
